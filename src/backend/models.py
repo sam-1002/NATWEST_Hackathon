@@ -155,7 +155,7 @@ def detect_anomalies(values: list, forecast_bands: list = None):
         z = (v - mean) / std if std > 0 else 0
         iqr_flag = v < lower or v > upper
 
-        if abs(z) > 2 or iqr_flag:
+        if abs(z) > 1.8 or iqr_flag:
             outside_band = False
             if forecast_bands and i < len(forecast_bands):
                 band = forecast_bands[i]

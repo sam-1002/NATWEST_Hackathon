@@ -1,29 +1,26 @@
 import os
-from google import genai
+from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 def explain_forecast(forecast: list, anomalies: list, baseline: list):
-
     forecast_text = "\n".join([
         f"Week {f['period']}: low={f['low']}, likely={f['likely']}, high={f['high']}"
         for f in forecast
     ])
-
     anomaly_text = "None detected" if not anomalies else "\n".join([
         f"Point {a['index']}: value={a['value']}, z_score={a['z_score']}, direction={a['direction']}"
         for a in anomalies
     ])
-
     baseline_text = f"Baseline average: {baseline[0]}"
 
     prompt = f"""
 You are a plain-English forecasting assistant helping business users understand data.
 
-Here are the forecast results:
+Forecast results:
 {forecast_text}
 
 Baseline comparison:
@@ -40,30 +37,31 @@ Write a clear 3-sentence summary for a non-technical business user:
 Keep it simple, specific, and actionable. No technical jargon.
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash-lite",
-        contents=prompt
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=200
     )
-    return response.text
+    return response.choices[0].message.content
 
 
 def explain_scenario(baseline_forecast: list, scenario_forecast: list, adjustment: float):
-
     prompt = f"""
-You are a forecasting assistant. A user tested a scenario with {adjustment:+.0f}% adjustment to their data.
+You are a forecasting assistant. A user tested a scenario with {adjustment:+.0f}% adjustment.
 
-Baseline forecast (next 4 weeks likely values): {[f['likely'] for f in baseline_forecast]}
-Scenario forecast (next 4 weeks likely values): {[f['likely'] for f in scenario_forecast]}
+Baseline forecast (likely values): {[f['likely'] for f in baseline_forecast]}
+Scenario forecast (likely values): {[f['likely'] for f in scenario_forecast]}
 
 Write 2 sentences:
 1. What changes under this scenario compared to baseline
-2. Whether this scenario looks better or worse and what the user should watch for
+2. Whether this looks better or worse and what to watch for
 
 Be specific with numbers. Keep it simple.
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash-lite",
-        contents=prompt
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=150
     )
-    return response.text
+    return response.choices[0].message.content
