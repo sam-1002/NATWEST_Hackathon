@@ -1,10 +1,13 @@
 import os
-from groq import Groq
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = OpenAI(
+    base_url="https://models.inference.ai.azure.com",
+    api_key=os.getenv("GITHUB_TOKEN")
+)
 
 def explain_forecast(forecast: list, anomalies: list, baseline: list):
     forecast_text = "\n".join([
@@ -38,7 +41,7 @@ Keep it simple, specific, and actionable. No technical jargon.
 """
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=200
     )
@@ -60,7 +63,7 @@ Be specific with numbers. Keep it simple.
 """
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=150
     )
