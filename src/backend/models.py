@@ -172,3 +172,135 @@ def detect_anomalies(values: list, forecast_bands: list = None):
             })
 
     return anomalies
+
+
+# ─── Multi-dimensional analysis for date|category|region|units_sold|revenue|profit ───
+
+def forecast_by_category(df: pd.DataFrame, periods: int = 4):
+    """
+    Groups revenue by product_category over time, forecasts each category,
+    and returns them ranked by total forecasted revenue (best first).
+    Requires columns: date, product_category, revenue
+    """
+    if "product_category" not in df.columns or "revenue" not in df.columns:
+        return []
+    
+    # Clean comma-formatted numbers
+    df = df.copy()
+    df["revenue"] = df["revenue"].astype(str).str.replace(",", "", regex=False)
+    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
+    
+    # Aggregate: total revenue per (date, category)
+    grouped = df.groupby(["date", "product_category"])["revenue"].sum().reset_index()
+    categories = grouped["product_category"].unique()
+
+    results = []
+    for cat in categories:
+        cat_df = grouped[grouped["product_category"] == cat].sort_values("date")
+        values = cat_df["revenue"].tolist()
+
+        if len(values) < 4:
+            continue
+
+        try:
+            forecast_result = run_forecast(values, periods)
+            forecast = forecast_result["forecast"]
+            total_forecasted = sum(f["likely"] for f in forecast)
+            last_4_avg = np.mean(values[-4:])
+            growth_pct = ((total_forecasted / periods - last_4_avg) / last_4_avg) * 100 if last_4_avg > 0 else 0
+
+            results.append({
+                "category": cat,
+                "forecasted_total": round(total_forecasted, 2),
+                "forecasted_weekly_avg": round(total_forecasted / periods, 2),
+                "current_weekly_avg": round(last_4_avg, 2),
+                "growth_pct": round(growth_pct, 2),
+                "forecast": forecast,
+                "model_used": forecast_result["model_used"]
+            })
+        except Exception:
+            continue
+
+    # Sort by forecasted total revenue descending
+    results.sort(key=lambda x: x["forecasted_total"], reverse=True)
+    return results
+
+
+def analyze_regions(df: pd.DataFrame):
+    """
+    Groups revenue by region over time.
+    For each region:
+    - Computes recent growth (last 4 weeks vs prior 4 weeks)
+    - Detects anomalies in the revenue series
+    - Flags as 'watch' if anomaly exists OR growth > 15% or < -10%
+    Requires columns: date, region, revenue
+    """
+    if "region" not in df.columns or "revenue" not in df.columns:
+        return []
+    
+    # Clean comma-formatted numbers
+    df = df.copy()
+    df["revenue"] = df["revenue"].astype(str).str.replace(",", "", regex=False)
+    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
+    
+    grouped = df.groupby(["date", "region"])["revenue"].sum().reset_index()
+    regions = grouped["region"].unique()
+
+    results = []
+    for region in regions:
+        reg_df = grouped[grouped["region"] == region].sort_values("date")
+        values = reg_df["revenue"].tolist()
+
+        if len(values) < 4:
+            continue
+
+        # Growth signal: compare last 4 vs prior 4
+        if len(values) >= 8:
+            recent = np.mean(values[-4:])
+            prior = np.mean(values[-8:-4])
+            growth_pct = ((recent - prior) / prior) * 100 if prior > 0 else 0
+        else:
+            recent = np.mean(values[-min(4, len(values)):])
+            growth_pct = 0
+
+        anomalies = detect_anomalies(values)
+        has_anomaly = len(anomalies) > 0
+        is_surging = growth_pct > 15
+        is_declining = growth_pct < -10
+
+        # Signal classification
+        if has_anomaly and is_surging:
+            signal = "anomaly_surge"
+            signal_label = "Anomaly + Surge"
+        elif has_anomaly and is_declining:
+            signal = "anomaly_decline"
+            signal_label = "Anomaly + Decline"
+        elif has_anomaly:
+            signal = "anomaly"
+            signal_label = "Anomaly Detected"
+        elif is_surging:
+            signal = "surge"
+            signal_label = "Strong Growth"
+        elif is_declining:
+            signal = "decline"
+            signal_label = "Declining"
+        else:
+            signal = "stable"
+            signal_label = "Stable"
+
+        watch = signal not in ("stable",)
+
+        results.append({
+            "region": region,
+            "growth_pct": round(growth_pct, 2),
+            "recent_avg_revenue": round(recent, 2),
+            "anomaly_count": len(anomalies),
+            "anomalies": anomalies,
+            "signal": signal,
+            "signal_label": signal_label,
+            "watch": watch
+        })
+
+    # Sort: watch regions first, then by abs growth
+    results.sort(key=lambda x: (not x["watch"], -abs(x["growth_pct"])))
+    return results
