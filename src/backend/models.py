@@ -7,25 +7,7 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import adfuller, acf
 from statsmodels.tsa.seasonal import seasonal_decompose
-
-
-def load_data(filepath: str):
-    df = pd.read_csv(filepath, parse_dates=["date"])
-    df = df.sort_values("date").reset_index(drop=True)
-    return df
-
-
-def compute_baseline(values: list, periods: int):
-    avg = np.mean(values[-4:])
-    return [round(avg, 2)] * periods
-
-
-def make_stationary(series):
-    result = adfuller(series)
-    p_value = result[1]
-    if p_value > 0.05:
-        return np.diff(series), 1
-    return series, 0
+from datetime import timedelta
 
 
 def detect_seasonality(values: list):
@@ -42,85 +24,50 @@ def detect_seasonality(values: list):
 def run_forecast_ets(values: list, periods: int, seasonal_periods=None):
     series = pd.Series(values, dtype=float)
     if seasonal_periods and len(values) >= 2 * seasonal_periods:
-        model = ExponentialSmoothing(
-            series,
-            trend="add",
-            seasonal="add",
-            seasonal_periods=seasonal_periods,
-            initialization_method="estimated"
-        )
+        model = ExponentialSmoothing(series, trend="add", seasonal="add",
+                                     seasonal_periods=seasonal_periods, initialization_method="estimated")
     else:
-        model = ExponentialSmoothing(
-            series,
-            trend="add",
-            seasonal=None,
-            initialization_method="estimated"
-        )
+        model = ExponentialSmoothing(series, trend="add", seasonal=None, initialization_method="estimated")
     fit = model.fit()
-    forecast = fit.forecast(periods)
-    return forecast.tolist(), fit.aic
+    return fit.forecast(periods).tolist(), fit.aic
 
 
 def run_forecast_arima(values: list, periods: int):
     series = pd.Series(values, dtype=float)
-    best_aic = float("inf")
+    best_aic, best_model = float("inf"), None
     best_order = (1, 1, 1)
-    best_model = None
     for p in range(3):
         for d in range(2):
             for q in range(3):
                 try:
-                    model = ARIMA(series, order=(p, d, q))
-                    fit = model.fit()
+                    fit = ARIMA(series, order=(p, d, q)).fit()
                     if fit.aic < best_aic:
-                        best_aic = fit.aic
-                        best_order = (p, d, q)
-                        best_model = fit
+                        best_aic, best_order, best_model = fit.aic, (p, d, q), fit
                 except:
                     continue
     if best_model is None:
-        model = ARIMA(series, order=(1, 1, 1))
-        best_model = model.fit()
+        best_model = ARIMA(series, order=(1, 1, 1)).fit()
         best_aic = best_model.aic
-    forecast = best_model.forecast(periods)
-    return forecast.tolist(), best_aic, best_order
-
-
-def decompose_series(values: list, period=None):
-    if period is None or len(values) < 2 * period:
-        return None
-    series = pd.Series(values)
-    result = seasonal_decompose(series, period=period)
-    return {
-        "trend": [round(x, 2) if not np.isnan(x) else None for x in result.trend.tolist()],
-        "seasonal": [round(x, 2) if not np.isnan(x) else None for x in result.seasonal.tolist()],
-        "residual": [round(x, 2) if not np.isnan(x) else None for x in result.resid.tolist()]
-    }
+    return best_model.forecast(periods).tolist(), best_aic, best_order
 
 
 def run_forecast(values: list, periods: int = 4):
     seasonal_period = detect_seasonality(values)
-
     ets_forecast, ets_aic = run_forecast_ets(values, periods, seasonal_period)
-
     try:
         arima_forecast, arima_aic, order = run_forecast_arima(values, periods)
         if arima_aic < ets_aic:
-            best_forecast = arima_forecast
-            model_used = f"ARIMA{order}"
+            best_forecast, model_used = arima_forecast, f"ARIMA{order}"
         else:
-            best_forecast = ets_forecast
-            model_used = "Exponential Smoothing"
+            best_forecast, model_used = ets_forecast, "Exponential Smoothing"
     except:
-        best_forecast = ets_forecast
-        model_used = "Exponential Smoothing"
+        best_forecast, model_used = ets_forecast, "Exponential Smoothing"
 
     std = np.std(values[-8:])
     last_value = values[-1]
-
     results = []
     for i, val in enumerate(best_forecast):
-        growth_pct = ((val - last_value) / last_value) * 100
+        growth_pct = ((val - last_value) / last_value) * 100 if last_value else 0
         results.append({
             "period": i + 1,
             "low": round(val - 1.5 * std, 2),
@@ -128,143 +75,190 @@ def run_forecast(values: list, periods: int = 4):
             "high": round(val + 1.5 * std, 2),
             "growth_pct": round(growth_pct, 2)
         })
-
-    decomposition = decompose_series(values, seasonal_period)
-
-    return {
-        "forecast": results,
-        "model_used": model_used,
-        "seasonality_period": seasonal_period,
-        "decomposition": decomposition
-    }
+    return {"forecast": results, "model_used": model_used, "seasonality_period": seasonal_period}
 
 
-def detect_anomalies(values: list, forecast_bands: list = None):
+def attach_forecast_dates(forecast: list, last_date) -> list:
+    """Attach real calendar date labels to each forecast period."""
+    for i, f in enumerate(forecast):
+        fd = last_date + timedelta(weeks=i + 1)
+        f["date_label"] = fd.strftime("%b %d")
+    return forecast
+
+
+def detect_anomalies(values: list, dates: list = None):
+    """Detect anomalies, optionally attaching real dates."""
     series = np.array(values, dtype=float)
-    mean = np.mean(series)
-    std = np.std(series)
-
-    q1 = np.percentile(series, 25)
-    q3 = np.percentile(series, 75)
+    mean, std = np.mean(series), np.std(series)
+    q1, q3 = np.percentile(series, 25), np.percentile(series, 75)
     iqr = q3 - q1
-    lower = q1 - 1.5 * iqr
-    upper = q3 + 1.5 * iqr
+    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
 
     anomalies = []
     for i, v in enumerate(series):
         z = (v - mean) / std if std > 0 else 0
         iqr_flag = v < lower or v > upper
-
         if abs(z) > 1.8 or iqr_flag:
-            outside_band = False
-            if forecast_bands and i < len(forecast_bands):
-                band = forecast_bands[i]
-                outside_band = v < band["low"] or v > band["high"]
-
-            anomalies.append({
+            severity = "severe" if abs(z) > 3 else "moderate" if abs(z) > 2.5 else "mild"
+            entry = {
                 "index": i,
                 "value": round(v, 2),
                 "z_score": round(z, 2),
                 "direction": "spike" if z > 0 else "dip",
                 "pct_from_mean": round(((v - mean) / mean) * 100, 2),
-                "outside_forecast_band": outside_band,
-                "next_step": f"Investigate data point {i} — value is {abs(round(((v - mean) / mean) * 100, 1))}% {'above' if z > 0 else 'below'} average."
-            })
-
+                "severity": severity,
+                "next_step": f"Investigate {'spike' if z > 0 else 'dip'} — value is {abs(round(((v - mean) / mean) * 100, 1))}% {'above' if z > 0 else 'below'} average."
+            }
+            if dates and i < len(dates):
+                entry["date"] = str(dates[i])
+            anomalies.append(entry)
     return anomalies
 
 
-# ─── Multi-dimensional analysis for date|category|region|units_sold|revenue|profit ───
-
-def forecast_by_category(df: pd.DataFrame, periods: int = 4, value_col: str = "revenue"):
+def forecast_filtered(df: pd.DataFrame, metric: str, periods: int,
+                       category_filter: str = None, region_filter: str = None):
     """
-    Groups revenue by product_category over time, forecasts each category,
-    and returns them ranked by total forecasted revenue (best first).
-    Requires columns: date, product_category, revenue
+    Filter df by category and/or region, then run forecast on the metric.
+    Returns forecast result + filtered historical + filter_label.
     """
-    if "product_category" not in df.columns:
-        return []
-    numeric_cols = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
-    if not numeric_cols:
-        return []
-    if value_col not in df.columns:
-        value_col = numeric_cols[0]
-    
-    # Clean comma-formatted numbers
-    df = df.copy()
-    df[value_col] = df[value_col].astype(str).str.replace(",", "", regex=False)
-    df[value_col] = pd.to_numeric(df[value_col], errors="coerce").fillna(0)
-    
-    # Aggregate: total revenue per (date, category)
-    grouped = df.groupby(["date", "product_category"])[value_col].sum().reset_index()
-    categories = grouped["product_category"].unique()
+    fdf = df.copy()
+    filter_parts = []
 
+    if category_filter and "product_category" in fdf.columns:
+        fdf = fdf[fdf["product_category"].str.lower() == category_filter.lower()]
+        filter_parts.append(category_filter)
+
+    if region_filter and "region" in fdf.columns:
+        fdf = fdf[fdf["region"].str.lower() == region_filter.lower()]
+        filter_parts.append(region_filter)
+
+    filter_label = " · ".join(filter_parts) if filter_parts else ""
+
+    if metric not in fdf.columns:
+        return None
+
+    # Aggregate by date
+    agg = fdf.groupby("date")[metric].sum().reset_index().sort_values("date")
+    if len(agg) < 4:
+        return None
+
+    values = agg[metric].tolist()
+    dates = [d.date() for d in agg["date"]]
+    last_date = agg["date"].max()
+
+    forecast_result = run_forecast(values, periods)
+    attach_forecast_dates(forecast_result["forecast"], last_date)
+    anomalies = detect_anomalies(values, dates)
+
+    historical = [
+        {"date": str(dates[i]), "value": round(v, 2)}
+        for i, v in enumerate(values)
+    ]
+
+    return {
+        "forecast": forecast_result["forecast"],
+        "model_used": forecast_result["model_used"],
+        "seasonality_period": forecast_result["seasonality_period"],
+        "historical": historical,
+        "anomalies": anomalies,
+        "filter_label": filter_label,
+        "values": values,
+        "last_date": last_date
+    }
+
+
+def anomalies_filtered(df: pd.DataFrame, metric: str, direction: str = "both",
+                        category_filter: str = None, region_filter: str = None):
+    """
+    Filter df, detect anomalies on metric, optionally filter by direction.
+    """
+    result = forecast_filtered(df, metric, periods=1,
+                                category_filter=category_filter,
+                                region_filter=region_filter)
+    if result is None:
+        return None
+
+    anomalies = result["anomalies"]
+    if direction == "spike":
+        anomalies = [a for a in anomalies if a["direction"] == "spike"]
+    elif direction == "dip":
+        anomalies = [a for a in anomalies if a["direction"] == "dip"]
+
+    return {
+        "anomalies": anomalies,
+        "historical": result["historical"],
+        "filter_label": result["filter_label"],
+        "total_points": len(result["values"])
+    }
+
+
+def best_by_dimension(df: pd.DataFrame, metric: str, dimension: str, periods: int = 4):
+    """
+    For each unique value of dimension (e.g. product_category or region),
+    forecast metric and rank by forecasted total.
+    Returns list of dicts sorted by forecasted revenue desc.
+    """
+    if dimension not in df.columns or metric not in df.columns:
+        return []
+
+    grouped = df.groupby(["date", dimension])[metric].sum().reset_index()
+    values_list = grouped[dimension].unique()
     results = []
-    for cat in categories:
-        cat_df = grouped[grouped["product_category"] == cat].sort_values("date")
-        values = cat_df[value_col].tolist()
 
+    for val in values_list:
+        sub = grouped[grouped[dimension] == val].sort_values("date")
+        values = sub[metric].tolist()
+        dates = [d.date() for d in sub["date"]]
+        last_date = sub["date"].max()
         if len(values) < 4:
             continue
-
         try:
-            forecast_result = run_forecast(values, periods)
-            forecast = forecast_result["forecast"]
-            total_forecasted = sum(f["likely"] for f in forecast)
-            last_4_avg = np.mean(values[-4:])
-            growth_pct = ((total_forecasted / periods - last_4_avg) / last_4_avg) * 100 if last_4_avg > 0 else 0
+            fr = run_forecast(values, periods)
+            attach_forecast_dates(fr["forecast"], last_date)
+            total = sum(f["likely"] for f in fr["forecast"])
+            last4_avg = np.mean(values[-4:])
+            growth_pct = ((total / periods - last4_avg) / last4_avg) * 100 if last4_avg > 0 else 0
+
+            historical = [{"date": str(dates[i]), "value": round(v, 2)} for i, v in enumerate(values)]
 
             results.append({
-                "category": cat,
-                "forecasted_total": round(total_forecasted, 2),
-                "forecasted_weekly_avg": round(total_forecasted / periods, 2),
-                "current_weekly_avg": round(last_4_avg, 2),
+                "value": val,
+                "forecasted_total": round(total, 2),
+                "forecasted_weekly_avg": round(total / periods, 2),
+                "current_weekly_avg": round(last4_avg, 2),
                 "growth_pct": round(growth_pct, 2),
-                "forecast": forecast,
-                "model_used": forecast_result["model_used"]
+                "forecast": fr["forecast"],
+                "historical": historical,
+                "model_used": fr["model_used"]
             })
-        except Exception:
+        except:
             continue
 
-    # Sort by forecasted total revenue descending
     results.sort(key=lambda x: x["forecasted_total"], reverse=True)
     return results
 
 
-def analyze_regions(df: pd.DataFrame, value_col: str = "revenue"):
+def most_anomalous_dimension(df: pd.DataFrame, metric: str, dimension: str):
     """
-    Groups revenue by region over time.
-    For each region:
-    - Computes recent growth (last 4 weeks vs prior 4 weeks)
-    - Detects anomalies in the revenue series
-    - Flags as 'watch' if anomaly exists OR growth > 15% or < -10%
-    Requires columns: date, region, revenue
+    For each unique value of dimension, detect anomalies and compute growth signal.
+    Returns list sorted by anomaly count desc (watch items first).
     """
-    if "region" not in df.columns:
+    if dimension not in df.columns or metric not in df.columns:
         return []
-    numeric_cols = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
-    if not numeric_cols:
-        return []
-    if value_col not in df.columns:
-        value_col = numeric_cols[0]
-    
-    # Clean comma-formatted numbers
-    df = df.copy()
-    df[value_col] = df[value_col].astype(str).str.replace(",", "", regex=False)
-    df[value_col] = pd.to_numeric(df[value_col], errors="coerce").fillna(0)
-    
-    grouped = df.groupby(["date", "region"])[value_col].sum().reset_index()
-    regions = grouped["region"].unique()
 
+    grouped = df.groupby(["date", dimension])[metric].sum().reset_index()
+    dim_values = grouped[dimension].unique()
     results = []
-    for region in regions:
-        reg_df = grouped[grouped["region"] == region].sort_values("date")
-        values = reg_df[value_col].tolist()
 
+    for val in dim_values:
+        sub = grouped[grouped[dimension] == val].sort_values("date")
+        values = sub[metric].tolist()
+        dates = [d.date() for d in sub["date"]]
         if len(values) < 4:
             continue
 
-        # Growth signal: compare last 4 vs prior 4
+        anomalies = detect_anomalies(values, dates)
+
         if len(values) >= 8:
             recent = np.mean(values[-4:])
             prior = np.mean(values[-8:-4])
@@ -273,44 +267,55 @@ def analyze_regions(df: pd.DataFrame, value_col: str = "revenue"):
             recent = np.mean(values[-min(4, len(values)):])
             growth_pct = 0
 
-        anomalies = detect_anomalies(values)
         has_anomaly = len(anomalies) > 0
         is_surging = growth_pct > 15
         is_declining = growth_pct < -10
 
-        # Signal classification
         if has_anomaly and is_surging:
-            signal = "anomaly_surge"
-            signal_label = "Anomaly + Surge"
+            signal, signal_label = "anomaly_surge", "Anomaly + Surge"
         elif has_anomaly and is_declining:
-            signal = "anomaly_decline"
-            signal_label = "Anomaly + Decline"
+            signal, signal_label = "anomaly_decline", "Anomaly + Decline"
         elif has_anomaly:
-            signal = "anomaly"
-            signal_label = "Anomaly Detected"
+            signal, signal_label = "anomaly", "Anomaly Detected"
         elif is_surging:
-            signal = "surge"
-            signal_label = "Strong Growth"
+            signal, signal_label = "surge", "Strong Growth"
         elif is_declining:
-            signal = "decline"
-            signal_label = "Declining"
+            signal, signal_label = "decline", "Declining"
         else:
-            signal = "stable"
-            signal_label = "Stable"
+            signal, signal_label = "stable", "Stable"
 
         watch = signal not in ("stable",)
+        historical = [{"date": str(dates[i]), "value": round(v, 2)} for i, v in enumerate(values)]
 
         results.append({
-            "region": region,
-            "growth_pct": round(growth_pct, 2),
-            "recent_avg_revenue": round(recent, 2),
+            "value": val,
             "anomaly_count": len(anomalies),
             "anomalies": anomalies,
+            "growth_pct": round(growth_pct, 2),
+            "recent_avg": round(recent, 2),
             "signal": signal,
             "signal_label": signal_label,
-            "watch": watch
+            "watch": watch,
+            "historical": historical
         })
 
-    # Sort: watch regions first, then by abs growth
-    results.sort(key=lambda x: (not x["watch"], -abs(x["growth_pct"])))
+    results.sort(key=lambda x: (not x["watch"], -x["anomaly_count"], -abs(x["growth_pct"])))
+    return results
+
+
+def forecast_by_category(df: pd.DataFrame, periods: int = 4):
+    """Wrapper kept for /insights endpoint compatibility."""
+    results = best_by_dimension(df, "revenue", "product_category", periods)
+    # Rename 'value' → 'category' for backward compat
+    for r in results:
+        r["category"] = r.pop("value")
+    return results
+
+
+def analyze_regions(df: pd.DataFrame):
+    """Wrapper kept for /insights endpoint compatibility."""
+    results = most_anomalous_dimension(df, "revenue", "region")
+    for r in results:
+        r["region"] = r.pop("value")
+        r["recent_avg_revenue"] = r.pop("recent_avg")
     return results
