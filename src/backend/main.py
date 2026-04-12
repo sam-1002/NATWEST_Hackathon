@@ -8,13 +8,18 @@ import pandas as pd
 import io
 import math
 from datetime import timedelta
+import sys
 
 
 def clean_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    for col_name in ["revenue", "profit", "units_sold", "value"]:
-        if col_name in df.columns:
-            df[col_name] = df[col_name].astype(str).str.replace(",", "", regex=False)
-            df[col_name] = pd.to_numeric(df[col_name], errors="coerce").fillna(0)
+    for col in df.columns:
+        if col == "date":
+            continue
+        if df[col].dtype == object:
+            cleaned = df[col].astype(str).str.replace(",", "", regex=False)
+            converted = pd.to_numeric(cleaned, errors="coerce")
+            if converted.notna().sum() > len(df) * 0.5:
+                df[col] = converted.fillna(0)
     return df
 
 app = FastAPI(title="Forecasting Tool API")
@@ -68,6 +73,114 @@ def validate_csv(file, contents):
     if "date" not in df.columns:
         raise HTTPException(status_code=400, detail="No 'date' column found.")
     return df
+
+
+def detect_schema(df: pd.DataFrame) -> dict:
+    schema = {
+        "numeric_cols": [],
+        "categorical_cols": {},
+        "row_count": len(df)
+    }
+    for col in df.columns:
+        if col == "date":
+            continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            schema["numeric_cols"].append(col)
+        elif df[col].dtype == object:
+            unique_vals = df[col].dropna().unique().tolist()
+            if len(unique_vals) <= 50:
+                schema["categorical_cols"][col] = unique_vals
+    return schema
+
+
+@app.post("/schema")
+async def get_schema(file: UploadFile = File(...)):
+    contents = await file.read()
+    try:
+        df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read file.")
+    df = clean_numeric_columns(df)
+    schema = detect_schema(df)
+    preview_cols = ["date"] + schema["numeric_cols"][:5] + list(schema["categorical_cols"].keys())[:3]
+    preview_cols = [c for c in preview_cols if c in df.columns]
+    preview = df[preview_cols].head(5).copy()
+    if "date" in preview.columns:
+        preview["date"] = pd.to_datetime(preview["date"]).dt.strftime("%Y-%m-%d")
+    return {
+        "schema": schema,
+        "preview": preview.to_dict(orient="records"),
+        "all_columns": [c for c in df.columns if c != "date"]
+    }
+
+
+@app.post("/forecast_smart")
+async def forecast_smart(
+    file: UploadFile = File(...),
+    column: str = "revenue",
+    periods: int = 4,
+    filters: str = "{}"
+):
+    import json
+    contents = await file.read()
+    try:
+        df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read file.")
+
+    if "date" not in df.columns:
+        raise HTTPException(status_code=400, detail="No date column found.")
+
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    df = clean_numeric_columns(df)
+
+    # Apply filters dynamically
+    filter_dict = json.loads(filters)
+    filter_description = []
+    for filter_col, filter_val in filter_dict.items():
+        if filter_col in df.columns:
+            df = df[df[filter_col].astype(str).str.lower() == str(filter_val).lower()]
+            filter_description.append(f"{filter_col}={filter_val}")
+
+    if len(df) < 4:
+        raise HTTPException(status_code=400, detail=f"Not enough data after filtering ({len(df)} rows). Try broader filters.")
+
+    # Auto-detect numeric cols after filtering
+    numeric_cols = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
+    if column not in numeric_cols:
+        column = numeric_cols[0] if numeric_cols else None
+    if not column:
+        raise HTTPException(status_code=400, detail="No numeric column found.")
+
+    # Aggregate by date
+    agg = df.groupby("date")[column].sum().reset_index()
+    values = agg[column].tolist()
+
+    forecast_result = run_forecast(values, periods)
+    anomalies = detect_anomalies(values)
+    baseline = [round(sum(values[-4:]) / 4, 2)] * periods
+    confidence = compute_confidence(values, forecast_result)
+    forecast_dates = generate_forecast_dates(agg, periods)
+
+    for i, f in enumerate(forecast_result["forecast"]):
+        f["date_label"] = forecast_dates[i] if i < len(forecast_dates) else f"W+{f['period']}"
+
+    filter_label = " · ".join(filter_description) if filter_description else "All data"
+
+    return {
+        "forecast": forecast_result["forecast"],
+        "historical": [{"date": str(row["date"].date()), "value": row[column]} for _, row in agg.iterrows()],
+        "anomalies": anomalies,
+        "baseline": baseline,
+        "confidence": confidence,
+        "model_used": forecast_result["model_used"],
+        "column": column,
+        "filters_applied": filter_dict,
+        "filter_label": filter_label,
+        "row_count": len(df),
+        "periods": periods
+    }
 
 
 @app.post("/forecast")
@@ -159,10 +272,9 @@ async def insights(file: UploadFile = File(...), periods: int = 4):
     if "date" not in df.columns:
         raise HTTPException(status_code=400, detail="No 'date' column found.")
 
-    required = {"revenue"}
-    missing = required - set(df.columns)
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required columns: {', '.join(missing)}. Expected: date, product_category, region, revenue")
+    numeric_cols = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
+    if not numeric_cols:
+        raise HTTPException(status_code=400, detail="No numeric columns found in your CSV.")
 
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
@@ -173,7 +285,11 @@ async def insights(file: UploadFile = File(...), periods: int = 4):
 
     # ── 1. Total Revenue Forecast ───────────────────────────────────────────
     # Aggregate total revenue per date across all categories/regions
-    total_revenue_by_date = df.groupby("date")["revenue"].sum().reset_index()
+    # Auto-detect the main numeric column (prefer revenue if exists)
+    numeric_cols = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
+    main_col = "revenue" if "revenue" in df.columns else numeric_cols[0]
+    total_revenue_by_date = df.groupby("date")[main_col].sum().reset_index()
+    total_revenue_by_date = total_revenue_by_date.rename(columns={main_col: "revenue"})
     total_revenue_values = total_revenue_by_date["revenue"].tolist()
 
     revenue_forecast_result = run_forecast(total_revenue_values, periods)
@@ -192,10 +308,10 @@ async def insights(file: UploadFile = File(...), periods: int = 4):
     ]
 
     # ── 2. Category Rankings ────────────────────────────────────────────────
-    category_rankings = forecast_by_category(df, periods)
+    category_rankings = forecast_by_category(df, periods, value_col=main_col)
 
     # ── 3. Region Signals ───────────────────────────────────────────────────
-    region_signals = analyze_regions(df)
+    region_signals = analyze_regions(df, value_col=main_col)
 
     # ── 4. Data Preview ─────────────────────────────────────────────────────
     preview_cols = ["date"] + [c for c in ["product_category", "region", "revenue", "profit", "units_sold"] if c in df.columns]
@@ -287,9 +403,6 @@ async def chat(
     question: str = Form(...),
     column: str = "revenue"
 ):
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file.")
-
     contents = await file.read()
     try:
         df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
@@ -297,73 +410,77 @@ async def chat(
         raise HTTPException(status_code=400, detail="Could not read this file.")
 
     if "date" not in df.columns:
-        raise HTTPException(status_code=400, detail="No 'date' column found.")
-
-    numeric_cols = [col for col in df.columns if col != "date" and pd.api.types.is_numeric_dtype(df[col])]
-    if not numeric_cols:
-        raise HTTPException(status_code=400, detail="No numeric columns found.")
+        raise HTTPException(status_code=400, detail="No date column found.")
 
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
     df = clean_numeric_columns(df)
 
-    from src.backend.explainer import parse_user_question
+    numeric_cols = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
+    schema = detect_schema(df)
+
     try:
-        parsed = parse_user_question(question, numeric_cols)
+        from src.backend.explainer import parse_user_question
+        parsed = parse_user_question(question, numeric_cols, schema)
+        print(f"DEBUG parsed: {parsed}", flush=True, file=sys.stderr)
         col = parsed.get("column", column)
         periods = parsed.get("periods", 4)
         intent = parsed.get("intent", "both")
+        filters = parsed.get("filters", {})
         if col not in df.columns:
             col = column if column in df.columns else numeric_cols[0]
-    except:
+    except Exception as e:
+        print(f"PARSE ERROR: {e}", flush=True)
         col = column if column in df.columns else numeric_cols[0]
         periods = 4
         intent = "both"
+        filters = {}
 
-    # Aggregate if multi-dimensional
-    if "product_category" in df.columns or "region" in df.columns:
-        agg = df.groupby("date")[col].sum().reset_index()
-        values = agg[col].tolist()
-        hist_df = agg
-    else:
-        values = df[col].tolist()
-        hist_df = df
+    # Apply filters
+    filtered_df = df.copy()
+    filter_description = []
+    for filter_col, filter_val in filters.items():
+        if filter_col in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df[filter_col].astype(str).str.lower() == str(filter_val).lower()]
+            filter_description.append(f"{filter_col}: {filter_val}")
+
+    if len(filtered_df) < 4:
+        raise HTTPException(status_code=400, detail=f"Not enough data after filtering ({len(filtered_df)} rows).")
+
+    agg = filtered_df.groupby("date")[col].sum().reset_index()
+    values = agg[col].tolist()
 
     forecast_result = run_forecast(values, periods)
     anomalies = detect_anomalies(values)
     baseline = [round(sum(values[-4:]) / 4, 2)] * periods
     confidence = compute_confidence(values, forecast_result)
-    forecast_dates = generate_forecast_dates(hist_df, periods)
+    forecast_dates = generate_forecast_dates(agg, periods)
 
     for i, f in enumerate(forecast_result["forecast"]):
         f["date_label"] = forecast_dates[i] if i < len(forecast_dates) else f"W+{f['period']}"
 
+    filter_label = " · ".join(filter_description) if filter_description else None
     ai_summary = explain_forecast(forecast_result["forecast"], anomalies, baseline, intent=intent, question=question)
 
-    preview_cols = ["date"] + [c for c in ["product_category", "region", "revenue", "profit", "units_sold"] if c in df.columns]
-    preview_rows = df[preview_cols].head(5).copy()
+    preview_rows = df.head(5).copy()
     preview_rows["date"] = preview_rows["date"].dt.strftime("%Y-%m-%d")
-    preview = preview_rows.to_dict(orient="records")
 
     return {
         "question": question,
-        "understood_as": f"Forecasting '{col}' for next {periods} weeks",
         "column": col,
         "periods": periods,
         "intent": intent,
+        "filters_applied": filters,
+        "filter_label": filter_label,
         "forecast": forecast_result["forecast"],
-        "model_used": forecast_result["model_used"],
-        "seasonality_period": forecast_result["seasonality_period"],
+        "historical": [{"date": str(row["date"].date()), "value": row[col]} for _, row in agg.iterrows()],
         "anomalies": anomalies,
         "baseline": baseline,
         "ai_summary": ai_summary,
         "confidence": confidence,
+        "model_used": forecast_result["model_used"],
         "numeric_columns": numeric_cols,
-        "selected_column": column,
-        "row_count": len(df),
-        "preview": preview,
-        "historical": [
-            {"date": str(row["date"].date()), "value": row[col]}
-            for _, row in hist_df.iterrows()
-        ]
+        "schema": schema,
+        "row_count": len(filtered_df),
+        "preview": preview_rows.to_dict(orient="records")
     }

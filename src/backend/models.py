@@ -176,28 +176,33 @@ def detect_anomalies(values: list, forecast_bands: list = None):
 
 # ─── Multi-dimensional analysis for date|category|region|units_sold|revenue|profit ───
 
-def forecast_by_category(df: pd.DataFrame, periods: int = 4):
+def forecast_by_category(df: pd.DataFrame, periods: int = 4, value_col: str = "revenue"):
     """
     Groups revenue by product_category over time, forecasts each category,
     and returns them ranked by total forecasted revenue (best first).
     Requires columns: date, product_category, revenue
     """
-    if "product_category" not in df.columns or "revenue" not in df.columns:
+    if "product_category" not in df.columns:
         return []
+    numeric_cols = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
+    if not numeric_cols:
+        return []
+    if value_col not in df.columns:
+        value_col = numeric_cols[0]
     
     # Clean comma-formatted numbers
     df = df.copy()
-    df["revenue"] = df["revenue"].astype(str).str.replace(",", "", regex=False)
-    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
+    df[value_col] = df[value_col].astype(str).str.replace(",", "", regex=False)
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce").fillna(0)
     
     # Aggregate: total revenue per (date, category)
-    grouped = df.groupby(["date", "product_category"])["revenue"].sum().reset_index()
+    grouped = df.groupby(["date", "product_category"])[value_col].sum().reset_index()
     categories = grouped["product_category"].unique()
 
     results = []
     for cat in categories:
         cat_df = grouped[grouped["product_category"] == cat].sort_values("date")
-        values = cat_df["revenue"].tolist()
+        values = cat_df[value_col].tolist()
 
         if len(values) < 4:
             continue
@@ -226,7 +231,7 @@ def forecast_by_category(df: pd.DataFrame, periods: int = 4):
     return results
 
 
-def analyze_regions(df: pd.DataFrame):
+def analyze_regions(df: pd.DataFrame, value_col: str = "revenue"):
     """
     Groups revenue by region over time.
     For each region:
@@ -235,21 +240,26 @@ def analyze_regions(df: pd.DataFrame):
     - Flags as 'watch' if anomaly exists OR growth > 15% or < -10%
     Requires columns: date, region, revenue
     """
-    if "region" not in df.columns or "revenue" not in df.columns:
+    if "region" not in df.columns:
         return []
+    numeric_cols = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
+    if not numeric_cols:
+        return []
+    if value_col not in df.columns:
+        value_col = numeric_cols[0]
     
     # Clean comma-formatted numbers
     df = df.copy()
-    df["revenue"] = df["revenue"].astype(str).str.replace(",", "", regex=False)
-    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
+    df[value_col] = df[value_col].astype(str).str.replace(",", "", regex=False)
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce").fillna(0)
     
-    grouped = df.groupby(["date", "region"])["revenue"].sum().reset_index()
+    grouped = df.groupby(["date", "region"])[value_col].sum().reset_index()
     regions = grouped["region"].unique()
 
     results = []
     for region in regions:
         reg_df = grouped[grouped["region"] == region].sort_values("date")
-        values = reg_df["revenue"].tolist()
+        values = reg_df[value_col].tolist()
 
         if len(values) < 4:
             continue

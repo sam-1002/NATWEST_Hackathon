@@ -8,7 +8,7 @@ import {
 const API = 'http://127.0.0.1:8000'
 
 // ─── Intent Detection ────────────────────────────────────────────────────────
-function detectIntent(message, activeColumn) {
+function detectIntent(message, activeColumn, schema) {
   const msg = message.toLowerCase()
   const weekMatch = msg.match(/(\d+)\s*week/)
   const weeks = weekMatch ? parseInt(weekMatch[1]) : 4
@@ -18,16 +18,47 @@ function detectIntent(message, activeColumn) {
   const adjustment = pct ?? (adjustMatch ? parseInt(adjustMatch[1]) : 10)
   const isNegative = msg.includes('drop') || msg.includes('decrease') ||
     msg.includes('fall') || msg.includes('reduce') || msg.includes('down')
+
+  // Check if message mentions any specific column or filter value from schema
+  // If so, send to /chat for AI-powered parsing
+  if (schema) {
+    const numericCols = schema.numeric_cols || []
+    const categoricalCols = schema.categorical_cols || {}
+
+    const mentionsColumn = numericCols.some(col =>
+      msg.includes(col.toLowerCase().replace('_', ' ')) ||
+      msg.includes(col.toLowerCase())
+    )
+
+    const mentionsFilter = Object.values(categoricalCols).some(vals =>
+      vals.some(val => msg.includes(val.toLowerCase()))
+    )
+
+    const mentionsCatCol = Object.keys(categoricalCols).some(col =>
+      msg.includes(col.toLowerCase().replace('_', ' ')) ||
+      msg.includes(col.toLowerCase())
+    )
+
+    if (mentionsColumn || mentionsFilter || mentionsCatCol) {
+      return { type: 'chat', weeks, column: activeColumn }
+    }
+  }
+
   const isKeepTrend = msg.includes('last month') || msg.includes('same trend') || msg.includes('keep the trend')
   if (isKeepTrend) return { type: 'scenario', weeks: 4, adjustment: 0, column: activeColumn }
+
   if (msg.includes('anomal') || msg.includes('unusual') || msg.includes('spike') || msg.includes('dip') || msg.includes('weird'))
     return { type: 'anomaly', weeks, column: activeColumn }
-  if (msg.includes('what if') || msg.includes('scenario') || msg.includes('grow') || msg.includes('increase') ||
+
+  if (msg.includes('what if') || msg.includes('scenario') ||
+    msg.includes('grow') || msg.includes('increase') ||
     msg.includes('drop') || msg.includes('decrease') || pct !== null)
     return { type: 'scenario', weeks, adjustment: isNegative ? -Math.abs(adjustment) : Math.abs(adjustment), column: activeColumn }
+
   if (msg.includes('forecast') || msg.includes('predict') || msg.includes('next') || msg.includes('future') || msg.includes('week'))
     return { type: 'forecast', weeks, column: activeColumn }
-  return { type: 'forecast', weeks: 4, column: activeColumn }
+
+  return { type: 'chat', weeks: 4, column: activeColumn }
 }
 
 // ─── Typing Indicator ────────────────────────────────────────────────────────
@@ -456,7 +487,68 @@ function ChatMessage({ msg }) {
           </div>
         )}
 
+        {msg.forecast && msg.historical && (
+          <div style={{ marginTop: 10 }}>
+            {msg.filterLabel && (
+              <div style={{ fontSize: 11, color: 'var(--accent)', marginBottom: 6, padding: '3px 10px', background: 'var(--accent-bg)', borderRadius: 20, display: 'inline-block', border: '1px solid rgba(79,142,247,0.2)' }}>
+                Filtered: {msg.filterLabel}
+              </div>
+            )}
+            {msg.chatColumn && (
+              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 6 }}>
+                Column: {msg.chatColumn}
+              </div>
+            )}
+            <RevenueForecastChart
+              historical={msg.historical}
+              forecast={msg.forecast}
+              anomalies={[]}
+            />
+          </div>
+        )}
+
       </div>
+    </div>
+  )
+}
+
+// ─── Privacy Badge ────────────────────────────────────────────────────────────
+function PrivacyBadge() {
+  const [show, setShow] = useState(false)
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex' }}>
+      <button
+        onMouseEnter={() => setShow(true)}
+        onMouseLeave={() => setShow(false)}
+        style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', borderRadius: 20, border: '1px solid rgba(52,211,153,0.25)', background: 'rgba(52,211,153,0.08)', cursor: 'pointer', color: 'var(--green)', fontSize: 11, fontWeight: 500 }}>
+        <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)' }} />
+        Data Private
+        <span style={{ fontSize: 10, opacity: 0.7 }}>ⓘ</span>
+      </button>
+
+      {show && (
+        <div style={{ position: 'absolute', top: 32, right: 0, width: 280, background: '#1a1a2e', border: '1px solid rgba(52,211,153,0.2)', borderRadius: 12, padding: '14px 16px', zIndex: 200 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--green)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)' }} />
+            Data Privacy Guarantee
+          </div>
+          {[
+            ['Raw data', 'Stays on your server only'],
+            ['AI receives', 'Aggregated stats only'],
+            ['Sent to AI', 'Weekly averages, growth %'],
+            ['Never sent', 'Individual rows or records'],
+            ['Column names', 'Sent for query understanding'],
+          ].map(([label, value]) => (
+            <div key={label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 7, gap: 8 }}>
+              <span style={{ fontSize: 11, color: 'var(--text-tertiary)', flexShrink: 0 }}>{label}</span>
+              <span style={{ fontSize: 11, color: 'var(--text-primary)', textAlign: 'right' }}>{value}</span>
+            </div>
+          ))}
+          <div style={{ borderTop: '1px solid rgba(52,211,153,0.15)', paddingTop: 8, marginTop: 4, fontSize: 10, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>
+            All forecasting math runs entirely on the backend. Only statistical summaries reach the AI.
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -471,6 +563,8 @@ export default function ChatApp() {
   const [insightsData, setInsightsData] = useState(null)
   const [dashData, setDashData] = useState(null)
   const [selectedColumn, setSelectedColumn] = useState(null)
+  const [mainColumn, setMainColumn] = useState('revenue')
+  const [dataSchema, setDataSchema] = useState(null)
   const [periods, setPeriods] = useState(4)
   const [dashLoading, setDashLoading] = useState(false)
   const [dashError, setDashError] = useState(null)
@@ -499,7 +593,24 @@ export default function ChatApp() {
     setDashData(null)
     setInsightsData(null)
     setMode(null)
-    setMessages(prev => [...prev, { role: 'bot', content: `📂 Loaded ${f.name}. Detecting dataset type and running analysis...` }])
+    setDataSchema(null)
+
+    // Fetch schema first
+    const schemaForm = new FormData()
+    schemaForm.append('file', f)
+    try {
+      const schemaRes = await axios.post(`${API}/schema`, schemaForm)
+      setDataSchema(schemaRes.data.schema)
+      const numCols = schemaRes.data.schema.numeric_cols
+      const catCols = Object.keys(schemaRes.data.schema.categorical_cols)
+      setMessages(prev => [...prev, {
+        role: 'bot',
+        content: `Loaded ${f.name}! I found ${numCols.length} numeric columns (${numCols.join(', ')}) and ${catCols.length} filter columns (${catCols.join(', ')}). Running full analysis...`
+      }])
+    } catch (e) {
+      console.log('Schema fetch failed, continuing...')
+    }
+
     setDashLoading(true)
     setDashError(null)
 
@@ -512,6 +623,10 @@ export default function ChatApp() {
         const res = await axios.post(`${API}/insights?periods=${periods}`, form)
         setInsightsData(res.data)
         setMode('insights')
+        // After successful insights call
+        const numericCols = Object.keys(res.data.preview?.[0] || {})
+          .filter(k => k !== 'date' && typeof res.data.preview[0][k] === 'number')
+        setMainColumn(numericCols[0] || 'revenue')
         setMessages(prev => [...prev, {
           role: 'bot',
           content: `✓ Multi-dimensional dataset detected — ${res.data.categories?.length || 0} categories, ${res.data.regions?.length || 0} regions. Dashboard shows total revenue forecast, category rankings, and region signals. Ask me anything!`
@@ -564,35 +679,56 @@ export default function ChatApp() {
     setMessages(prev => [...prev, { role: 'user', content: msg }])
     setInput('')
     setChatLoading(true)
-    const intent = detectIntent(msg, selectedColumn || 'revenue')
+    const intent = detectIntent(msg, selectedColumn || mainColumn, dataSchema)
     try {
       const form = new FormData()
       form.append('file', file)
-      if (intent.type === 'scenario') {
+      if (intent.type === 'chat' || 
+          (intent.type === 'forecast' && msg.toLowerCase().includes('in ')) ||
+          (intent.type === 'forecast' && msg.toLowerCase().includes('for '))) {
         try {
-          const scenarioForm = new FormData()
-          scenarioForm.append('file', file)
-          const col = mode === 'insights' ? 'revenue' : (selectedColumn || 'revenue')
-          const res = await axios.post(
-            `${API}/scenario?adjustment_pct=${intent.adjustment}&periods=${intent.weeks}&column=${col}`,
-            scenarioForm
-          )
-          setMessages(prev => [...prev, {
-            role: 'bot',
-            content: res.data.ai_summary,
-            comparison: res.data.comparison,
-            adjustment: intent.adjustment
-          }])
+          const chatForm = new FormData()
+          chatForm.append('file', file)
+          chatForm.append('question', msg)
+          const chatCol = mode === 'insights' ? mainColumn : (selectedColumn || mainColumn || 'revenue')
+          const res = await axios.post(`${API}/chat?column=${chatCol}`, chatForm)
+          const d = res.data
+
+          const msgL = msg.toLowerCase()
+          const wantsSpike = msgL.includes('spike') || msgL.includes('jump') || msgL.includes('surge')
+          const wantsDip = msgL.includes('dip') || msgL.includes('drop') || msgL.includes('fall')
+          let filteredAnomalies = d.anomalies || []
+          if (wantsSpike && !wantsDip) filteredAnomalies = filteredAnomalies.filter(a => a.direction === 'spike')
+          else if (wantsDip && !wantsSpike) filteredAnomalies = filteredAnomalies.filter(a => a.direction === 'dip')
+
+          if (d.intent === 'anomaly') {
+            setMessages(prev => [...prev, {
+              role: 'bot',
+              content: filteredAnomalies.length > 0
+                ? `Found ${filteredAnomalies.length} anomaly in "${d.column}"${d.filter_label ? ` (${d.filter_label})` : ''}:`
+                : `No anomalies detected in "${d.column}"${d.filter_label ? ` (${d.filter_label})` : ''}.`,
+              anomalies: filteredAnomalies
+            }])
+          } else {
+            setMessages(prev => [...prev, {
+              role: 'bot',
+              content: d.ai_summary,
+              forecast: d.forecast,
+              historical: d.historical,
+              chatColumn: d.column,
+              filterLabel: d.filter_label,
+              confidence: d.confidence
+            }])
+          }
         } catch (e) {
-          console.error('Scenario error:', e.response?.data)
           setMessages(prev => [...prev, {
             role: 'bot',
-            content: `Scenario failed: ${e.response?.data?.detail || e.message}`
+            content: `Sorry, I could not process that question. Try rephrasing it, e.g. "forecast units_sold for Electronics in East for next 3 weeks"`
           }])
         }
         setChatLoading(false)
         return
-      } else {
+      } else if (intent.type === 'scenario') {
         let res
         const msgLower = msg.toLowerCase()
         const isCategoryQuestion = msgLower.includes('category') || msgLower.includes('best') || msgLower.includes('performing') || msgLower.includes('product')
@@ -694,7 +830,7 @@ export default function ChatApp() {
           const chatForm = new FormData()
           chatForm.append('file', file)
           chatForm.append('question', msg)
-          const chatCol = mode === 'insights' ? 'revenue' : (selectedColumn || 'revenue')
+          const chatCol = mode === 'insights' ? mainColumn : (selectedColumn || mainColumn)
           res = await axios.post(`${API}/chat?column=${chatCol}`, chatForm)
         } catch {
           const f2 = new FormData()
@@ -743,7 +879,16 @@ export default function ChatApp() {
             anomalies: filteredAnomalies
           }])
         } else {
-          setMessages(prev => [...prev, { role: 'bot', content: d.ai_summary || 'Analysis complete — check the dashboard for details.' }])
+          const filterInfo = d.filter_label ? ` (filtered: ${d.filter_label})` : ''
+          setMessages(prev => [...prev, {
+            role: 'bot',
+            content: d.ai_summary,
+            forecast: d.forecast,
+            historical: d.historical,
+            chatColumn: d.column,
+            filterLabel: d.filter_label,
+            confidence: d.confidence
+          }])
         }
       }
     } catch (e) {
@@ -758,16 +903,21 @@ export default function ChatApp() {
 
   const suggestions = mode === 'insights'
     ? [
-        'Forecast total revenue next 4 weeks',
+        `Forecast total ${mainColumn} next 4 weeks`,
         'Any sudden spikes I should look at?',
-        'What if revenue increases by 10%?',
+        `What if ${mainColumn} increases by 10%?`,
         'Which category should I focus on?',
         'Which region is declining?',
         'What if we keep last month\'s trend?'
       ]
     : selectedColumn
-      ? [`Forecast ${selectedColumn} next 4 weeks`, `Any anomalies in ${selectedColumn}?`, `What if ${selectedColumn} grows by 20%?`]
-      : ['Forecast next 4 weeks', 'Any anomalies in my data?', 'What if sales grow by 20%?']
+      ? [
+          `Forecast ${selectedColumn} next 4 weeks`,
+          `Any anomalies in ${selectedColumn}?`,
+          `What if ${selectedColumn} grows by 20%?`,
+          `What if ${selectedColumn} drops by 15%?`,
+        ]
+      : ['Forecast next 4 weeks', 'Any anomalies?', 'What if sales grow by 20%?']
 
   // Derived metrics for insights mode
   const id = insightsData
@@ -817,8 +967,13 @@ export default function ChatApp() {
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.3px' }}>Forecast Dashboard</div>
               <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>NatWest Hackathon · AI Predictive Forecasting</div>
+              <div style={{ fontSize: 10, color: 'var(--green)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)' }} />
+                Raw data never leaves your server
+              </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <PrivacyBadge />
               {fileName && <div style={{ fontSize: 11, padding: '3px 10px', borderRadius: 20, background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid rgba(52,211,153,0.2)', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fileName}</div>}
               {(dashData || insightsData) && (
                 <select value={periods} onChange={e => {
@@ -1008,7 +1163,13 @@ export default function ChatApp() {
               </div>
             </div>
             {(dashData || insightsData) && (
-              <div style={{ marginLeft: 'auto', fontSize: 10, padding: '3px 10px', borderRadius: 20, background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid rgba(52,211,153,0.2)', fontWeight: 600 }}>● LIVE</div>
+              <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ fontSize: 10, padding: '3px 10px', borderRadius: 20, background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid rgba(52,211,153,0.2)', fontWeight: 600 }}>● LIVE</div>
+                <div style={{ fontSize: 10, padding: '3px 8px', borderRadius: 20, background: 'rgba(52,211,153,0.06)', color: 'var(--green)', border: '1px solid rgba(52,211,153,0.15)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <div style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)' }} />
+                  Data Private
+                </div>
+              </div>
             )}
           </div>
 
