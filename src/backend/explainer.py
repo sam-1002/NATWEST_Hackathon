@@ -57,13 +57,14 @@ Available data schema:
 Parse the question and return ONLY a JSON object with these fields:
 
 {{
-  "intent": "<one of: forecast, anomaly, best_dimension, anomaly_by_dimension, scenario, scenario_best_worst>",
-  "metric": "<which numeric column they want, default to first one if unclear>",
+  "intent": "<one of: forecast, anomaly, best_dimension, anomaly_by_dimension, scenario, scenario_best_worst, driver_analysis, impact_simulation, lead_indicator, multivariate_forecast>",
+  "metric": "<which numeric column they want as TARGET, default to first one if unclear>",
+  "driver_metric": "<second numeric column they mention as a DRIVER/CAUSE, else null>",
   "periods": <integer weeks ahead, default 4>,
   "category_filter": "<specific category value if mentioned, else null>",
   "region_filter": "<specific region value if mentioned, else null>",
   "dimension": "<'product_category' or 'region' if they ask about which category/region is best/worst, else null>",
-  "adjustment_pct": <number if scenario, null otherwise>,
+  "adjustment_pct": <number if scenario or impact_simulation, null otherwise>,
   "direction": "<'spike', 'dip', or 'both' for anomaly questions>",
   "scenario_type": "<'single', 'flat', 'best_worst'>"
 }}
@@ -75,6 +76,10 @@ Intent rules:
 - "anomaly_by_dimension" → asking which category or region has most unusual activity
 - "scenario" → "what if X grows/drops by N%" or "what if we keep last month's trend"
 - "scenario_best_worst" → asking for best case vs worst case
+- "driver_analysis" → asking what drives or influences a metric, what factors impact it, what causes changes in it. Keywords: driving, driven by, factors, influences, causes, impacts, affects
+- "impact_simulation" → asking the effect of a change in ONE metric on ANOTHER metric. Keywords: effect of, impact of, if X increases/decreases by N%, what happens to Y if X changes
+- "lead_indicator" → asking if one metric predicts another in advance. Keywords: predict in advance, leading indicator, does X predict Y, does X move before Y, early signal
+- "multivariate_forecast" → asking to forecast a metric USING another metric as input. Keywords: forecast X using Y, predict X factoring in Y, forecast X with Y
 
 Scenario type rules:
 - "single" → specific percentage given
@@ -85,6 +90,11 @@ Direction rules for anomaly:
 - "spike" → mentions spike, jump, surge, high, increase unexpectedly
 - "dip" → mentions dip, drop, fall, low, decline unexpectedly
 - "both" → general anomaly question
+
+For multivariate intents (driver_analysis, impact_simulation, lead_indicator, multivariate_forecast):
+- "metric" = the TARGET column (what they want to understand or forecast)
+- "driver_metric" = the INPUT/DRIVER column (what they think causes or predicts the target)
+- If only one column is mentioned for driver_analysis, set driver_metric to null
 
 Return ONLY the JSON, no explanation, no markdown.
 """
@@ -534,7 +544,7 @@ def explain_insights(revenue_forecast: list, category_rankings: list, region_sig
         if best_cat else "No category data"
     )
     region_text = "\n".join([
-        f"  Region {r['value']}: {r['signal_label']}, {r['growth_pct']:+.1f}% growth, "
+        f"  Region {r.get('region', r.get('value', 'Unknown'))}: {r['signal_label']}, {r['growth_pct']:+.1f}% growth, "
         f"{r['anomaly_count']} anomalies"
         for r in region_signals
     ]) if region_signals else "No region data"
@@ -568,5 +578,199 @@ Specific numbers, punchy, no jargon, use £ for monetary values.
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=120
+    )
+    return response.choices[0].message.content
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MULTIVARIATE EXPLAINERS — Q10, Q11, Q12, Q13
+# All pre-compute stats in Python; only send summaries to LLM.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def explain_driver_analysis(result: dict, question: str = "") -> str:
+    """
+    Q10 — Explains which columns most influence the target metric.
+    Pre-computed correlations passed in; LLM only writes the plain-English summary.
+    """
+    if result.get("error") or not result.get("drivers"):
+        return f"Could not identify drivers: {result.get('error', 'No significant correlations found.')}."
+
+    target = result["target"]
+    top = result["drivers"][:3]
+
+    driver_lines = "\n".join([
+        f"  {i+1}. {d['column']}: {d['strength']} {d['direction']} relationship (r={d['correlation']:+.2f})"
+        for i, d in enumerate(top)
+    ])
+
+    prompt = f"""
+You are a business analytics assistant.
+User asked: "{question}"
+Target metric: {target}
+
+TOP DRIVERS (pre-computed Pearson correlations):
+{driver_lines}
+
+Write exactly 2 sentences:
+1. Name the top 1-2 drivers, their direction (positive/negative), and correlation strength.
+   e.g. "The strongest driver of revenue is marketing_spend (strong positive, r=+0.81), followed by new_customers (moderate positive, r=+0.54)."
+2. One actionable business insight — what this relationship means and what to do.
+   e.g. "Every increase in marketing_spend is closely followed by a revenue uplift, suggesting marketing investment is yielding returns."
+
+Rules: plain English, specific with column names and r-values, no jargon, no hedging.
+"""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=150
+    )
+    return response.choices[0].message.content
+
+
+def explain_impact_simulation(result: dict, question: str = "") -> str:
+    """
+    Q11 — Explains the projected effect of a % change in driver on target.
+    All numbers pre-computed via OLS; LLM writes the plain-English output.
+    """
+    if result.get("error"):
+        return f"Could not simulate impact: {result['error']}."
+
+    prompt = f"""
+You are a business forecasting assistant.
+User asked: "{question}"
+
+IMPACT SIMULATION RESULTS (pre-computed via OLS regression):
+- Driver metric: {result['driver_metric']} (current avg: {result['current_driver_avg']:,.2f})
+- Target metric: {result['target_metric']} (current avg: {result['current_target_avg']:,.2f})
+- Scenario: {result['change_pct']:+.0f}% change in {result['driver_metric']}
+- Regression slope: {result['slope']:.4f} (correlation r={result['correlation']:+.2f})
+- Projected {result['target_metric']}: {result['projected_target']:,.2f}
+- Projected change: {result['projected_change']:+,.2f} ({result['projected_change_pct']:+.1f}%)
+
+Write exactly 2 sentences following this style:
+1. "A [N]% [increase/decrease] in [driver] is associated with a [X]% [increase/decrease] in [target], pushing it from [current] to [projected]."
+2. One planning implication — what this means and what action to take.
+
+Rules: plain English, specific numbers, use £ for monetary metrics, no jargon.
+"""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=150
+    )
+    return response.choices[0].message.content
+
+
+def explain_lead_indicator(result: dict, question: str = "") -> str:
+    """
+    Q12 — Explains whether metric A predicts metric B in advance.
+    Cross-correlation and optional Granger results pre-computed; LLM writes the output.
+    """
+    if result.get("error"):
+        return f"Could not run lead indicator test: {result['error']}."
+
+    granger_note = ""
+    if result.get("granger_significant"):
+        g = result["granger_detail"]
+        granger_note = f"Granger causality test confirms this at lag {g['lag']} (p={g['p_value']})."
+    elif result.get("granger_significant") is False:
+        granger_note = "Granger causality test did not find statistical significance."
+
+    lag_lines = "\n".join([
+        f"  Lag {r['lag_weeks']} week(s): correlation={r['correlation']:+.3f}"
+        for r in result.get("lag_results", [])
+    ])
+
+    prompt = f"""
+You are a business analytics assistant.
+User asked: "{question}"
+
+LEAD INDICATOR TEST RESULTS:
+- Column A (potential predictor): {result['col_a']}
+- Column B (target): {result['col_b']}
+- Is A a leading indicator of B? {'YES' if result['is_leading_indicator'] else 'NO'}
+- Best predictive lag: {result['best_lag_weeks']} week(s) ahead
+- Best correlation at that lag: {result['best_correlation']:+.3f} ({result['strength']})
+- Direction: {result['direction']}
+{granger_note}
+
+Lag breakdown:
+{lag_lines}
+
+Write exactly 2 sentences:
+1. Direct answer — does {result['col_a']} predict {result['col_b']} in advance, by how many weeks, and how strongly.
+   e.g. "Yes — marketing_spend is a moderate positive leading indicator for revenue, predicting it 2 weeks ahead (r=+0.61)."
+2. Practical implication — what to monitor and when to act.
+   e.g. "Watch marketing_spend levels now — a rise this week is likely to show up as higher revenue in 2 weeks."
+
+Rules: plain English, specific numbers, no jargon, decisive answer.
+"""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=150
+    )
+    return response.choices[0].message.content
+
+
+def explain_multivariate_forecast(result: dict, question: str = "") -> str:
+    """
+    Q13 — Explains a VAR-based multivariate forecast.
+    Forecast values and model info pre-computed; LLM writes the plain-English output.
+    """
+    if result.get("error"):
+        return f"Could not run multivariate forecast: {result['error']}."
+
+    forecast = result["forecast"]
+    target = result["target_metric"]
+    drivers = result["driver_metrics"]
+    model = result["model_used"]
+
+    forecast_lines = "\n".join([
+        f"  {f.get('date_label', 'Week ' + str(f['period']))}: "
+        f"low={f['low']:,.0f}, likely={f['likely']:,.0f}, high={f['high']:,.0f}, "
+        f"growth={f.get('growth_pct', 0):+.1f}%"
+        for f in forecast
+    ])
+
+    corr_lines = "\n".join([
+        f"  {c['driver']}: correlation with {target} = {c['correlation']:+.3f}"
+        for c in result.get("correlation_context", [])
+    ])
+
+    total_likely = sum(f["likely"] for f in forecast)
+    total_low = sum(f["low"] for f in forecast)
+    total_high = sum(f["high"] for f in forecast)
+    var_note = "VAR model used — forecast informed by driver trends." if result.get("var_used") else "Univariate fallback used — driver correlation noted but not incorporated into forecast."
+
+    prompt = f"""
+You are a business forecasting assistant.
+User asked: "{question}"
+Target metric: {target}
+Driver metrics used: {', '.join(drivers)}
+Model: {model} ({var_note})
+
+DRIVER CORRELATIONS:
+{corr_lines}
+
+MULTIVARIATE FORECAST (low / likely / high):
+{forecast_lines}
+
+TOTAL over {len(forecast)} weeks: {total_likely:,.0f} (range {total_low:,.0f}–{total_high:,.0f})
+
+Write exactly 3 sentences:
+1. Trend sentence — overall direction of the forecast and which driver is influencing it most.
+   e.g. "Factoring in marketing_spend trends, revenue is forecast to grow +6% over the next 4 weeks."
+2. Numbers sentence — total likely value and the range.
+   e.g. "The likely total over 4 weeks is £X (range £Y–£Z), peaking on [date]."
+3. Action sentence — what the driver relationship means for planning.
+   e.g. "Since marketing_spend strongly drives revenue (r=+0.78), maintaining or increasing spend is key to hitting the upper forecast."
+
+Rules: plain English, specific numbers, use £ for monetary metrics, no jargon.
+"""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=200
     )
     return response.choices[0].message.content

@@ -147,6 +147,42 @@ function ConfidenceBar({ confidence, dashData }) {
   )
 }
 
+// ─── Data Preview (small table shown in insights mode) ───────────────────────
+function DataPreview({ preview, rowCount }) {
+  if (!preview?.length) return null
+  const cols = Object.keys(preview[0])
+  return (
+    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, marginBottom: 16, overflow: 'hidden' }}>
+      <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>📋 Data Preview</span>
+        <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, background: 'var(--bg-hover)', color: 'var(--text-tertiary)' }}>{rowCount} rows · {cols.length} cols</span>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: '#0f0f1e' }}>
+              {cols.map(c => (
+                <th key={c} style={{ padding: '7px 12px', textAlign: 'left', fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>{c}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {preview.map((row, i) => (
+              <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                {cols.map(c => (
+                  <td key={c} style={{ padding: '6px 12px', color: typeof row[c] === 'number' ? '#93bbff' : 'var(--text-secondary)', whiteSpace: 'nowrap', fontSize: 12 }}>
+                    {typeof row[c] === 'number' ? row[c]?.toLocaleString() : String(row[c] ?? '')}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 // ─── Full CSV Viewer ──────────────────────────────────────────────────────────
 function CsvViewer({ allRows, rowCount }) {
   const [searchTerm, setSearchTerm] = useState('')
@@ -706,6 +742,83 @@ function ChatMessage({ msg }) {
             <div style={{ fontSize: 11, fontWeight: 600, color: d.confidence.score >= 75 ? 'var(--green)' : d.confidence.score >= 50 ? '#fb923c' : 'var(--red)' }}>{d.confidence.score}/100 {d.confidence.label}</div>
           </div>
         )}
+        {/* ── Q10: Driver Analysis ── */}
+        {d.graph_type === 'driver_analysis' && d.drivers?.length > 0 && (
+          <div style={{ marginTop: 10, background: 'var(--bg-secondary)', borderRadius: 10, padding: '12px 14px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>Top drivers of {d.metric}</div>
+            {d.drivers.map((dr, i) => (
+              <div key={dr.column} style={{ marginBottom: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <div style={{ width: 7, height: 7, borderRadius: '50%', background: COLORS[i % COLORS.length] }} />
+                    <span style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: i === 0 ? 600 : 400 }}>{dr.column}</span>
+                    <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, background: dr.direction === 'positive' ? 'rgba(52,211,153,0.1)' : 'rgba(248,113,113,0.1)', color: dr.direction === 'positive' ? 'var(--green)' : 'var(--red)', border: `1px solid ${dr.direction === 'positive' ? 'rgba(52,211,153,0.2)' : 'rgba(248,113,113,0.2)'}` }}>{dr.direction}</span>
+                  </div>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)' }}>r = {dr.correlation > 0 ? '+' : ''}{dr.correlation}</span>
+                </div>
+                <div style={{ height: 3, background: 'rgba(255,255,255,0.05)', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${dr.abs_correlation * 100}%`, background: COLORS[i % COLORS.length], borderRadius: 3, opacity: i === 0 ? 1 : 0.55 }} />
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 2 }}>{dr.strength} relationship</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* ── Q11: Impact Simulation ── */}
+        {d.graph_type === 'impact_simulation' && d.projected_target != null && (
+          <div style={{ marginTop: 10, background: 'var(--bg-secondary)', borderRadius: 10, padding: '12px 14px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>Impact simulation</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+              {[
+                ['Driver', d.driver_metric, 'var(--text-secondary)'],
+                ['Target', d.target_metric, 'var(--text-secondary)'],
+                ['Change applied', `${d.change_pct > 0 ? '+' : ''}${d.change_pct}%`, d.change_pct >= 0 ? 'var(--green)' : 'var(--red)'],
+                ['Projected change', `${d.projected_change_pct > 0 ? '+' : ''}${d.projected_change_pct?.toFixed(1)}%`, d.projected_change_pct >= 0 ? 'var(--green)' : 'var(--red)'],
+              ].map(([label, val, color]) => (
+                <div key={label} style={{ padding: '8px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: 8, border: '1px solid var(--border)' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 3 }}>{label}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color }}>{val}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: '8px 10px', background: 'rgba(79,142,247,0.06)', borderRadius: 8, border: '1px solid rgba(79,142,247,0.15)', fontSize: 11, color: 'var(--text-secondary)' }}>
+              Correlation: r = {d.correlation > 0 ? '+' : ''}{d.correlation} · Current {d.driver_metric} avg: {d.current_driver_avg?.toLocaleString()} → Projected {d.target_metric}: <strong style={{ color: 'var(--accent-light)' }}>{d.projected_target?.toLocaleString()}</strong>
+            </div>
+          </div>
+        )}
+        {/* ── Q12: Lead Indicator ── */}
+        {d.graph_type === 'lead_indicator' && d.col_a && (
+          <div style={{ marginTop: 10, background: 'var(--bg-secondary)', borderRadius: 10, padding: '12px 14px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>Lead indicator test</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 9, marginBottom: 10, background: d.is_leading_indicator ? 'rgba(52,211,153,0.07)' : 'rgba(248,113,113,0.07)', border: `1px solid ${d.is_leading_indicator ? 'rgba(52,211,153,0.2)' : 'rgba(248,113,113,0.2)'}` }}>
+              <span style={{ fontSize: 18 }}>{d.is_leading_indicator ? '✅' : '❌'}</span>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: d.is_leading_indicator ? 'var(--green)' : 'var(--red)' }}>
+                  {d.col_a} {d.is_leading_indicator ? 'IS' : 'is NOT'} a leading indicator for {d.col_b}
+                </div>
+                {d.is_leading_indicator && (
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                    Predicts {d.best_lag_weeks} week(s) ahead · {d.strength} {d.direction} (r={d.best_correlation > 0 ? '+' : ''}{d.best_correlation})
+                  </div>
+                )}
+              </div>
+            </div>
+            {d.lag_results?.length > 0 && (
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 6 }}>Correlation by lag:</div>
+                {d.lag_results.map(lr => (
+                  <div key={lr.lag_weeks} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <span style={{ fontSize: 11, color: 'var(--text-tertiary)', width: 60, flexShrink: 0 }}>Lag {lr.lag_weeks}w</span>
+                    <div style={{ flex: 1, height: 4, background: 'rgba(255,255,255,0.05)', borderRadius: 4, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${Math.abs(lr.correlation) * 100}%`, background: Math.abs(lr.correlation) >= 0.6 ? '#34d399' : Math.abs(lr.correlation) >= 0.35 ? '#fb923c' : '#8888a8', borderRadius: 4 }} />
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', width: 50, textAlign: 'right', flexShrink: 0 }}>{lr.correlation > 0 ? '+' : ''}{lr.correlation}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -825,6 +938,18 @@ export default function ChatApp() {
           rankings: d.rankings, dimension: d.dimension, signals: d.signals,
           comparison: d.comparison, adjustment_pct: d.adjustment_pct,
           best_forecast: d.best_forecast, worst_forecast: d.worst_forecast, baseline_forecast: d.baseline_forecast,
+          // Q10 driver analysis
+          drivers: d.drivers,
+          // Q11 impact simulation
+          projected_target: d.projected_target, projected_change_pct: d.projected_change_pct,
+          driver_metric: d.driver_metric, target_metric: d.target_metric, change_pct: d.change_pct,
+          correlation: d.correlation, current_driver_avg: d.current_driver_avg, current_target_avg: d.current_target_avg,
+          // Q12 lead indicator
+          is_leading_indicator: d.is_leading_indicator, best_lag_weeks: d.best_lag_weeks,
+          best_correlation: d.best_correlation, strength: d.strength, lag_results: d.lag_results,
+          col_a: d.col_a, col_b: d.col_b,
+          // Q13 multivariate forecast
+          var_used: d.var_used, correlation_context: d.correlation_context,
         }
       }])
     } catch {
@@ -836,10 +961,10 @@ export default function ChatApp() {
   const handleKey = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }
 
   const suggestions = mode === 'insights'
-    ? [`What will ${mainColumn} look like next 4 weeks?`, 'Which category performs best?', 'Which region has the most unusual activity?', 'Any sudden spikes in revenue?', `What if ${mainColumn} grows by 10%?`, 'Show best case vs worst case']
+    ? [`What will ${mainColumn} look like next 4 weeks?`, 'Which category performs best?', 'Which region has the most unusual activity?', `What is driving ${mainColumn}?`, `Does marketing_spend predict ${mainColumn} in advance?`, 'Show best case vs worst case']
     : selectedColumn
-      ? [`Forecast ${selectedColumn} next 4 weeks`, `Any anomalies in ${selectedColumn}?`, `What if ${selectedColumn} grows by 20%?`, 'Show best case vs worst case']
-      : ['Forecast next 4 weeks', 'Any anomalies?', 'What if sales grow by 20%?']
+      ? [`Forecast ${selectedColumn} next 4 weeks`, `Any anomalies in ${selectedColumn}?`, `What is driving ${selectedColumn}?`, `What if ${selectedColumn} grows by 20%?`]
+      : ['Forecast next 4 weeks', 'Any anomalies?', 'What is driving revenue?']
 
   // Derived values
   const id = insightsData

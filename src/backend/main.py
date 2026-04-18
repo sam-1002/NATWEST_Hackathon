@@ -4,13 +4,16 @@ from src.backend.models import (
     run_forecast, detect_anomalies, attach_forecast_dates,
     forecast_filtered, anomalies_filtered,
     best_by_dimension, most_anomalous_dimension,
-    forecast_by_category, analyze_regions
+    forecast_by_category, analyze_regions,
+    driver_analysis, impact_simulation, lead_indicator_test, multivariate_forecast
 )
 from src.backend.scenario import run_scenario
 from src.backend.explainer import (
     parse_user_question, explain_forecast, explain_anomaly,
     explain_best_dimension, explain_anomaly_by_dimension,
-    explain_scenario, explain_scenario_best_worst, explain_insights
+    explain_scenario, explain_scenario_best_worst, explain_insights,
+    explain_driver_analysis, explain_impact_simulation,
+    explain_lead_indicator, explain_multivariate_forecast
 )
 import pandas as pd
 import io
@@ -265,7 +268,8 @@ async def chat(
         parsed = {
             "intent": "forecast", "metric": numeric_cols[0], "periods": 4,
             "category_filter": None, "region_filter": None, "dimension": None,
-            "adjustment_pct": None, "direction": "both", "scenario_type": "single"
+            "adjustment_pct": None, "direction": "both", "scenario_type": "single",
+            "driver_metric": None
         }
 
     intent = parsed.get("intent", "forecast")
@@ -279,6 +283,11 @@ async def chat(
     adjustment_pct = parsed.get("adjustment_pct") or 10
     direction = parsed.get("direction", "both")
     scenario_type = parsed.get("scenario_type", "single")
+    driver_metric = parsed.get("driver_metric")
+
+    # Validate driver_metric if present
+    if driver_metric and driver_metric not in df.columns:
+        driver_metric = None
 
     # ── Q1 / Q2: forecast ─────────────────────────────────────────────────
     if intent == "forecast":
@@ -423,6 +432,121 @@ async def chat(
             "worst_comparison": worst_result["comparison"],
             "ai_summary": ai_summary,
             "graph_type": "best_worst"
+        }
+
+    # ── Q10: driver_analysis ──────────────────────────────────────────────
+    if intent == "driver_analysis":
+        result = driver_analysis(df, metric)
+        if result.get("error"):
+            return {"intent": "driver_analysis", "ai_summary": result["error"], "metric": metric}
+        ai_summary = explain_driver_analysis(result, question)
+        return {
+            "intent": "driver_analysis",
+            "metric": metric,
+            "drivers": result["drivers"],
+            "total_columns_analysed": result["total_columns_analysed"],
+            "ai_summary": ai_summary,
+            "graph_type": "driver_analysis"
+        }
+
+    # ── Q11: impact_simulation ────────────────────────────────────────────
+    if intent == "impact_simulation":
+        if not driver_metric:
+            return {
+                "intent": "impact_simulation",
+                "ai_summary": "Please specify both a driver metric and a target metric. For example: 'If marketing_spend increases by 20%, what happens to revenue?'",
+                "metric": metric
+            }
+        adj = float(adjustment_pct) if adjustment_pct else 10.0
+        result = impact_simulation(df, driver_metric, metric, adj)
+        if result.get("error"):
+            return {"intent": "impact_simulation", "ai_summary": result["error"], "metric": metric}
+        ai_summary = explain_impact_simulation(result, question)
+        return {
+            "intent": "impact_simulation",
+            "target_metric": metric,
+            "driver_metric": driver_metric,
+            "change_pct": adj,
+            "projected_target": result["projected_target"],
+            "projected_change": result["projected_change"],
+            "projected_change_pct": result["projected_change_pct"],
+            "correlation": result["correlation"],
+            "slope": result["slope"],
+            "current_driver_avg": result["current_driver_avg"],
+            "current_target_avg": result["current_target_avg"],
+            "ai_summary": ai_summary,
+            "graph_type": "impact_simulation"
+        }
+
+    # ── Q12: lead_indicator ───────────────────────────────────────────────
+    if intent == "lead_indicator":
+        if not driver_metric:
+            return {
+                "intent": "lead_indicator",
+                "ai_summary": "Please specify two metrics. For example: 'Does marketing_spend predict revenue in advance?'",
+                "metric": metric
+            }
+        result = lead_indicator_test(df, driver_metric, metric)
+        if result.get("error"):
+            return {"intent": "lead_indicator", "ai_summary": result["error"], "metric": metric}
+        ai_summary = explain_lead_indicator(result, question)
+        return {
+            "intent": "lead_indicator",
+            "col_a": driver_metric,
+            "col_b": metric,
+            "is_leading_indicator": result["is_leading_indicator"],
+            "best_lag_weeks": result["best_lag_weeks"],
+            "best_correlation": result["best_correlation"],
+            "strength": result["strength"],
+            "direction": result["direction"],
+            "lag_results": result["lag_results"],
+            "granger_significant": result["granger_significant"],
+            "ai_summary": ai_summary,
+            "graph_type": "lead_indicator"
+        }
+
+    # ── Q13: multivariate_forecast ────────────────────────────────────────
+    if intent == "multivariate_forecast":
+        drivers = [driver_metric] if driver_metric else []
+        if not drivers:
+            # Fall back to univariate forecast with a note
+            result = forecast_filtered(df, metric, periods, None, None)
+            if result is None:
+                return {"intent": "multivariate_forecast", "ai_summary": "Could not generate forecast.", "metric": metric}
+            baseline = [round(sum(result["values"][-4:]) / 4, 2)] * periods
+            ai_summary = explain_forecast(
+                result["forecast"], result["anomalies"], baseline,
+                metric=metric, question=question,
+                model_used=result.get("model_used", ""),
+                seasonality_period=result.get("seasonality_period")
+            )
+            return {
+                "intent": "multivariate_forecast",
+                "metric": metric,
+                "note": "No driver metric detected — showing standard univariate forecast.",
+                "forecast": result["forecast"],
+                "historical": result["historical"],
+                "model_used": result["model_used"],
+                "ai_summary": ai_summary,
+                "graph_type": "forecast"
+            }
+
+        result = multivariate_forecast(df, metric, drivers, periods)
+        if result.get("error"):
+            return {"intent": "multivariate_forecast", "ai_summary": result["error"], "metric": metric}
+        ai_summary = explain_multivariate_forecast(result, question)
+        return {
+            "intent": "multivariate_forecast",
+            "target_metric": metric,
+            "driver_metrics": result["driver_metrics"],
+            "forecast": result["forecast"],
+            "historical": result["historical"],
+            "model_used": result["model_used"],
+            "var_used": result["var_used"],
+            "correlation_context": result["correlation_context"],
+            "univariate_forecast": result["univariate_forecast"],
+            "ai_summary": ai_summary,
+            "graph_type": "forecast"
         }
 
     # Fallback — treat as forecast
