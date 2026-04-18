@@ -130,7 +130,9 @@ async def forecast(file: UploadFile = File(...), periods: int = 4, column: str =
 
     ai_summary = explain_forecast(
         forecast_result["forecast"], anomalies, baseline,
-        metric=column, question=f"Forecast {column}"
+        metric=column, question=f"Forecast {column}",
+        model_used=forecast_result["model_used"],
+        seasonality_period=forecast_result["seasonality_period"]
     )
 
     return {
@@ -288,7 +290,9 @@ async def chat(
         confidence = compute_confidence(result["values"], {"seasonality_period": result.get("seasonality_period")})
         ai_summary = explain_forecast(
             result["forecast"], result["anomalies"], baseline,
-            metric=metric, filter_label=result["filter_label"], question=question
+            metric=metric, filter_label=result["filter_label"], question=question,
+            model_used=result.get("model_used", ""),
+            seasonality_period=result.get("seasonality_period")
         )
         return {
             "intent": "forecast",
@@ -326,9 +330,15 @@ async def chat(
         if result is None:
             return {"intent": "anomaly", "ai_summary": "Not enough data after applying filters.", "metric": metric}
 
+        # Run a forecast to get bands — used so explainer can say "outside normal range"
+        fc_result = forecast_filtered(df, metric, len(result["anomalies"]) or 4,
+                                       category_filter, region_filter)
+        forecast_bands = fc_result["forecast"] if fc_result else None
+
         ai_summary = explain_anomaly(
             result["anomalies"], metric, result["filter_label"],
-            result["total_points"], direction, question
+            result["total_points"], direction, question,
+            forecast_bands=forecast_bands
         )
         return {
             "intent": "anomaly",
@@ -420,7 +430,12 @@ async def chat(
     if result is None:
         return {"intent": "forecast", "ai_summary": "Could not generate forecast.", "metric": metric}
     baseline = [round(sum(result["values"][-4:]) / 4, 2)] * periods
-    ai_summary = explain_forecast(result["forecast"], result["anomalies"], baseline, metric=metric, question=question)
+    ai_summary = explain_forecast(
+        result["forecast"], result["anomalies"], baseline,
+        metric=metric, question=question,
+        model_used=result.get("model_used", ""),
+        seasonality_period=result.get("seasonality_period")
+    )
     return {
         "intent": "forecast",
         "metric": metric,

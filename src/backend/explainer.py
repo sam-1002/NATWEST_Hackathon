@@ -1,5 +1,24 @@
+"""
+explainer.py  —  LLM-powered plain-English explanations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Three gaps fixed vs the original:
+
+1. FORECAST — now passes trend direction, seasonality label, and model name
+   so the LLM can say "seasonal spike expected in Week 3" instead of just
+   restating the numbers.
+
+2. ANOMALY — now passes forecast bands per anomaly point so the LLM can say
+   "this value is outside the normal forecast range". Also passes severity and
+   a domain-context block so it can suggest likely causes.
+
+3. SCENARIO — now passes full low/likely/high ranges (not just likely values)
+   and explicit totals so the LLM can produce the side-by-side comparison
+   format with ranges that the problem statement requires.
+"""
+
 import os
 import json
+import numpy as np
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -11,6 +30,10 @@ client = OpenAI(
 )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# QUERY PARSER  — unchanged from original
+# ══════════════════════════════════════════════════════════════════════════════
+
 def parse_user_question(question: str, schema: dict) -> dict:
     """
     Parses user question into a structured intent object.
@@ -18,26 +41,9 @@ def parse_user_question(question: str, schema: dict) -> dict:
         "numeric_cols": ["revenue", "units_sold", "profit"],
         "categorical_cols": {"product_category": ["Electronics", ...], "region": ["North", ...]}
     }
-    Returns:
-    {
-        "intent": one of [forecast, anomaly, best_dimension, anomaly_by_dimension, scenario, scenario_best_worst],
-        "metric": "revenue",
-        "periods": 4,
-        "category_filter": "Electronics" or null,
-        "region_filter": "North" or null,
-        "dimension": "product_category" or "region" or null,
-        "adjustment_pct": 10 or null,
-        "direction": "spike" or "dip" or "both",
-        "scenario_type": "single" or "flat" or "best_worst"
-    }
     """
     numeric_cols = schema.get("numeric_cols", [])
     categorical_cols = schema.get("categorical_cols", {})
-
-    all_cat_values = {}
-    for col, vals in categorical_cols.items():
-        for v in vals:
-            all_cat_values[v.lower()] = (col, v)
 
     prompt = f"""
 You are a query parser for a business forecasting app.
@@ -82,7 +88,6 @@ Direction rules for anomaly:
 
 Return ONLY the JSON, no explanation, no markdown.
 """
-
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
@@ -93,41 +98,228 @@ Return ONLY the JSON, no explanation, no markdown.
     return json.loads(text)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS — compute trend/seasonality labels locally before calling LLM
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _trend_label(forecast: list) -> str:
+    """Derive a plain-English trend label from the forecast list."""
+    if len(forecast) < 2:
+        return "stable"
+    first = forecast[0]["likely"]
+    last  = forecast[-1]["likely"]
+    if first == 0:
+        return "stable"
+    change = ((last - first) / abs(first)) * 100
+    if change > 5:
+        return f"upward (+{change:.1f}% over the forecast window)"
+    if change < -5:
+        return f"downward ({change:.1f}% over the forecast window)"
+    return "broadly flat"
+
+
+def _seasonality_label(seasonality_period) -> str:
+    """Convert numeric period to a readable label."""
+    if seasonality_period == 7:
+        return "weekly seasonality detected"
+    if seasonality_period == 12:
+        return "monthly/annual seasonality detected"
+    if seasonality_period:
+        return f"seasonality detected (period={seasonality_period})"
+    return "no significant seasonality"
+
+
+def _peak_week(forecast: list) -> str:
+    """Return the date label of the highest forecast period."""
+    if not forecast:
+        return "unknown"
+    peak = max(forecast, key=lambda f: f["likely"])
+    return peak.get("date_label", f"Week {peak['period']}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIX 1 — FORECAST EXPLAINER
+# Now includes: trend direction, seasonality label, model used, peak period
+# ══════════════════════════════════════════════════════════════════════════════
+
 def explain_forecast(forecast: list, anomalies: list, baseline: list,
                      metric: str = "revenue", filter_label: str = "",
-                     intent: str = "both", question: str = ""):
+                     intent: str = "both", question: str = "",
+                     model_used: str = "", seasonality_period=None):
+    """
+    FIX: passes trend direction, seasonality label, model name, and peak period
+    so the LLM can address all three PS requirements:
+      - Predict likely values (already done)
+      - Show range of outcomes (low/high passed)
+      - Highlight key patterns: trend + seasonality (NOW ADDED)
+    """
+    filter_ctx = f" for {filter_label}" if filter_label else ""
+
+    # --- compute pattern context locally (no LLM needed) ---
+    trend = _trend_label(forecast)
+    season_label = _seasonality_label(seasonality_period)
+    peak = _peak_week(forecast)
+    baseline_avg = baseline[0] if baseline else 0
 
     forecast_text = "\n".join([
-        f"{f.get('date_label', 'Week {}'.format(f['period']))}: "
+        f"  {f.get('date_label', 'Week ' + str(f['period']))}: "
         f"low={f['low']:,.0f}, likely={f['likely']:,.0f}, high={f['high']:,.0f}, "
-        f"growth={f.get('growth_pct', 0):+.1f}%"
+        f"growth vs last={f.get('growth_pct', 0):+.1f}%"
         for f in forecast
     ])
-    anomaly_text = "None detected" if not anomalies else "\n".join([
-        f"{a.get('date', 'Point {}'.format(a['index']))} : "
-        f"value={a['value']:,.0f}, z={a['z_score']}, {a['direction']}, "
-        f"{abs(a['pct_from_mean']):.1f}% from mean"
-        for a in anomalies
-    ])
-    filter_ctx = f" for {filter_label}" if filter_label else ""
+
+    anomaly_ctx = ""
+    if anomalies:
+        anomaly_ctx = "Historical anomalies in this series:\n" + "\n".join([
+            f"  {a.get('date', 'Point ' + str(a['index']))}: "
+            f"{a['direction']}, {abs(a['pct_from_mean']):.1f}% from mean"
+            for a in anomalies
+        ])
 
     prompt = f"""
 You are a plain-English forecasting assistant for business users.
-The user asked: "{question}"
+User asked: "{question}"
 Metric: {metric}{filter_ctx}
 
-Forecast:
+PATTERN ANALYSIS (use this in your answer):
+- Trend: {trend}
+- Seasonality: {season_label}
+- Highest forecast period: {peak}
+- Model used: {model_used or 'statistical model'}
+- Baseline average (last 4 periods): {baseline_avg:,.0f}
+
+FORECAST (low / likely / high):
 {forecast_text}
 
-Baseline average: {baseline[0]:,.0f}
-Anomalies: {anomaly_text}
+{anomaly_ctx}
 
-Write 3 clear sentences:
-1. Direct answer — what the forecast shows and the trend direction
-2. Key numbers — the specific values they need to know with dates
-3. Action — what to do or watch for
+Write exactly 3 sentences:
+1. Trend sentence — state the overall direction and mention seasonality if present
+   e.g. "Revenue is trending upward +8% with a seasonal spike expected in Week 3."
+2. Numbers sentence — give the specific likely values and the low-to-high range
+   e.g. "The likely total over 4 weeks is £X (range £Y–£Z), peaking at £W on [date]."
+3. Action sentence — what to watch or do next based on the trend and any anomalies
 
-No jargon. Be specific with numbers. Use £ for monetary values.
+Rules: no jargon, use £ for monetary values, be specific with dates and numbers.
+"""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=200
+    )
+    return response.choices[0].message.content
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIX 2 — ANOMALY EXPLAINER
+# Now includes: forecast band comparison, severity, likely causes context
+# ══════════════════════════════════════════════════════════════════════════════
+
+def explain_anomaly(anomalies: list, metric: str, filter_label: str = "",
+                    total_points: int = 0, direction: str = "both",
+                    question: str = "", forecast_bands: list = None):
+    """
+    FIX: now passes forecast bands so LLM can say "outside normal forecast range".
+    Also adds severity and a domain-context block for likely causes.
+    Addresses all three PS anomaly requirements:
+      - Flag spikes/dips (already done)
+      - Show whether movement is outside forecast range (NOW ADDED)
+      - Provide explanations and likely causes (NOW ADDED)
+      - Suggest next steps (NOW ADDED with domain-specific suggestions)
+    """
+    filter_ctx = f" for {filter_label}" if filter_label else ""
+
+    if not anomalies:
+        direction_word = (
+            "spike" if direction == "spike"
+            else "dip" if direction == "dip"
+            else "anomaly"
+        )
+        return (
+            f"No {direction_word} detected in {metric}{filter_ctx} — "
+            f"the data looks clean and within expected ranges."
+        )
+
+    # Build anomaly text with band comparison
+    anom_lines = []
+    for a in anomalies:
+        date_str   = a.get("date", f"Point {a['index']}")
+        severity   = a.get("severity", "moderate")
+        band_note  = ""
+
+        # Check if this anomaly index has a forecast band to compare against
+        if forecast_bands:
+            idx = a["index"]
+            if idx < len(forecast_bands):
+                band = forecast_bands[idx]
+                if a["value"] < band["low"]:
+                    band_note = f" — BELOW forecast range ({band['low']:,.0f}–{band['high']:,.0f})"
+                elif a["value"] > band["high"]:
+                    band_note = f" — ABOVE forecast range ({band['low']:,.0f}–{band['high']:,.0f})"
+                else:
+                    band_note = f" — within forecast range ({band['low']:,.0f}–{band['high']:,.0f})"
+
+        anom_lines.append(
+            f"  {date_str}: {a['direction'].upper()} ({severity}), "
+            f"value={a['value']:,.0f} "
+            f"({abs(a['pct_from_mean']):.1f}% {'above' if a['z_score'] > 0 else 'below'} mean, "
+            f"z={a['z_score']}){band_note}"
+        )
+
+    anom_text = "\n".join(anom_lines)
+
+    # Domain-context block — gives LLM something to reason about for causes
+    likely_causes = {
+        "spike": [
+            "promotional event or marketing campaign",
+            "bulk order or one-off large transaction",
+            "data entry error (duplicate records)",
+            "seasonal demand surge",
+        ],
+        "dip": [
+            "supply or stock issue",
+            "system outage or data pipeline failure",
+            "lost key customer or contract",
+            "holiday or bank holiday effect",
+        ],
+        "both": [
+            "seasonal effects",
+            "one-off events (promotions, outages, bulk orders)",
+            "data pipeline errors",
+            "external market changes",
+        ]
+    }
+    causes_text = ", ".join(likely_causes.get(direction, likely_causes["both"]))
+
+    next_steps = {
+        "spike": "check for duplicate records or bulk orders; if genuine, investigate whether the surge is sustainable",
+        "dip":   "check system logs and data pipelines for errors; if genuine, escalate to operations or supply chain",
+        "both":  "review the affected dates in source systems and check for data errors before drawing conclusions",
+    }
+    step_text = next_steps.get(direction, next_steps["both"])
+
+    prompt = f"""
+You are a business anomaly detection assistant.
+User asked: "{question}"
+Metric: {metric}{filter_ctx} ({total_points} total data points analysed)
+
+ANOMALIES FOUND:
+{anom_text}
+
+CONTEXT FOR YOUR ANSWER:
+- Likely causes to consider: {causes_text}
+- Suggested next step: {step_text}
+
+Write exactly 3 sentences:
+1. Direct answer — how many anomalies, when, and whether they are inside or outside
+   the normal forecast range (use the band notes above)
+   e.g. "3 unusual spikes detected on [dates], two of which exceeded the upper forecast band."
+2. Magnitude sentence — the specific values and how far they deviate from normal
+   e.g. "The largest spike on [date] reached £X, which is Y% above the expected range."
+3. Action sentence — likely cause and what to investigate next
+   e.g. "This may indicate a bulk order or data error — check source records for [date]."
+
+Rules: plain English, no jargon, specific with dates and numbers, use £ for monetary values.
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -137,45 +329,142 @@ No jargon. Be specific with numbers. Use £ for monetary values.
     return response.choices[0].message.content
 
 
-def explain_anomaly(anomalies: list, metric: str, filter_label: str = "",
-                    total_points: int = 0, direction: str = "both", question: str = ""):
-    filter_ctx = f" for {filter_label}" if filter_label else ""
-    if not anomalies:
-        return f"No {'spike' if direction == 'spike' else 'dip' if direction == 'dip' else 'anomaly'} detected in {metric}{filter_ctx} — the data looks clean and within expected ranges."
+# ══════════════════════════════════════════════════════════════════════════════
+# FIX 3 — SCENARIO EXPLAINER (single adjustment)
+# Now includes: full low/likely/high ranges, totals, side-by-side comparison
+# ══════════════════════════════════════════════════════════════════════════════
 
-    anom_text = "\n".join([
-        f"- {a.get('date', 'Point {}'.format(a['index']))} : "
-        f"{a['direction']}, value={a['value']:,.0f} "
-        f"({abs(a['pct_from_mean']):.1f}% from mean, z={a['z_score']})"
-        for a in anomalies
-    ])
+def explain_scenario(baseline_forecast: list, scenario_forecast: list,
+                     adjustment: float, metric: str = "revenue", question: str = ""):
+    """
+    FIX: passes full low/likely/high ranges (not just likely values) and
+    per-period side-by-side comparison so the LLM can produce the PS example:
+      "Under a +10% scenario, X expected to reach 18,000 (vs 15,900 baseline).
+       Range: 17,200–19,500."
+    """
+    scenario_type = "flat trend (no change)" if adjustment == 0 else f"{adjustment:+.0f}% adjustment"
+
+    # Build side-by-side comparison rows with ranges
+    comparison_rows = []
+    for base, scen in zip(baseline_forecast, scenario_forecast):
+        period = base.get("date_label", f"Week {base['period']}")
+        diff   = scen["likely"] - base["likely"]
+        comparison_rows.append(
+            f"  {period}: baseline {base['likely']:,.0f} (range {base['low']:,.0f}–{base['high']:,.0f})  →  "
+            f"scenario {scen['likely']:,.0f} (range {scen['low']:,.0f}–{scen['high']:,.0f})  "
+            f"[diff {diff:+,.0f}]"
+        )
+    comparison_text = "\n".join(comparison_rows)
+
+    # Totals
+    base_total   = sum(f["likely"] for f in baseline_forecast)
+    scen_total   = sum(f["likely"] for f in scenario_forecast)
+    scen_low     = sum(f["low"]    for f in scenario_forecast)
+    scen_high    = sum(f["high"]   for f in scenario_forecast)
+    total_diff   = scen_total - base_total
+    total_diff_pct = (total_diff / base_total * 100) if base_total else 0
+
     prompt = f"""
-You are a business anomaly detection assistant.
-User asked: "{question}"
-Metric: {metric}{filter_ctx} ({total_points} total data points)
+You are a forecasting assistant. User asked: "{question}"
+Metric: {metric}, scenario: {scenario_type}
 
-Anomalies found:
-{anom_text}
+SIDE-BY-SIDE COMPARISON (baseline → scenario, with ranges):
+{comparison_text}
 
-Write 2-3 sentences:
-1. Direct answer — yes/no, how many, when
-2. What the values show — magnitude, dates
-3. What to investigate or do next
+TOTALS over {len(baseline_forecast)} weeks:
+  Baseline total: {base_total:,.0f}
+  Scenario total: {scen_total:,.0f} (range {scen_low:,.0f}–{scen_high:,.0f})
+  Total difference: {total_diff:+,.0f} ({total_diff_pct:+.1f}%)
 
-Plain English, no jargon, specific with dates and numbers.
+Write exactly 2 sentences following this style:
+1. "Under a [scenario], [metric] is expected to reach [scenario total] over [N] weeks
+    (vs [baseline total] baseline). Range: [low]–[high]."
+2. "The biggest difference appears in [week with largest gap] — [brief implication for planning]."
+
+Rules: match the style exactly, use £ for monetary values, be specific with all numbers.
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=150
+        max_tokens=160
     )
     return response.choices[0].message.content
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# FIX 3b — SCENARIO BEST/WORST EXPLAINER
+# Now includes ranges per week and planning buffer guidance
+# ══════════════════════════════════════════════════════════════════════════════
+
+def explain_scenario_best_worst(best_forecast: list, worst_forecast: list,
+                                 baseline_forecast: list,
+                                 metric: str = "revenue", question: str = ""):
+    """
+    FIX: passes week-by-week ranges for all three scenarios so the LLM
+    can produce a genuine side-by-side comparison with ranges.
+    """
+    b_total    = sum(f["likely"] for f in best_forecast)
+    w_total    = sum(f["likely"] for f in worst_forecast)
+    base_total = sum(f["likely"] for f in baseline_forecast)
+
+    b_low  = sum(f["low"]  for f in best_forecast)
+    b_high = sum(f["high"] for f in best_forecast)
+    w_low  = sum(f["low"]  for f in worst_forecast)
+    w_high = sum(f["high"] for f in worst_forecast)
+
+    # Week-by-week rows
+    rows = []
+    for i, (best, worst, base) in enumerate(zip(best_forecast, worst_forecast, baseline_forecast)):
+        period = best.get("date_label", f"Week {i+1}")
+        rows.append(
+            f"  {period}: worst {worst['likely']:,.0f} ({worst['low']:,.0f}–{worst['high']:,.0f})  |  "
+            f"base {base['likely']:,.0f}  |  "
+            f"best {best['likely']:,.0f} ({best['low']:,.0f}–{best['high']:,.0f})"
+        )
+    weekly_table = "\n".join(rows)
+
+    gap = b_total - w_total
+
+    prompt = f"""
+You are a forecasting assistant. User asked: "{question}"
+Metric: {metric}
+
+WEEKLY COMPARISON (worst | baseline | best):
+{weekly_table}
+
+TOTALS over {len(baseline_forecast)} weeks:
+  Best case (+20%):  {b_total:,.0f} (range {b_low:,.0f}–{b_high:,.0f})
+  Baseline:          {base_total:,.0f}
+  Worst case (-20%): {w_total:,.0f} (range {w_low:,.0f}–{w_high:,.0f})
+  Gap (best vs worst): {gap:,.0f}
+
+Write exactly 2 sentences following this style:
+1. "Best case totals £[X] over [N] weeks (range £[low]–£[high]);
+    worst case totals £[Y] (range £[low]–£[high]) — a gap of £[Z]."
+2. "To manage this uncertainty, plan for a buffer of at least £[gap/4 per week]
+    per week — [one specific planning action based on the direction of risk]."
+
+Rules: use £ for monetary values, be specific with all numbers.
+"""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=160
+    )
+    return response.choices[0].message.content
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIMENSION EXPLAINERS — unchanged in logic, minor prompt tightening
+# ══════════════════════════════════════════════════════════════════════════════
+
 def explain_best_dimension(rankings: list, metric: str, dimension: str, question: str = ""):
     top3 = rankings[:3]
     ranking_text = "\n".join([
-        f"{i+1}. {r['value']}: forecasted avg {r['forecasted_weekly_avg']:,.0f}/week, {r['growth_pct']:+.1f}% growth"
+        f"  {i+1}. {r['value']}: avg {r['forecasted_weekly_avg']:,.0f}/week, "
+        f"{r['growth_pct']:+.1f}% growth, range "
+        f"{min(f['low'] for f in r.get('forecast', [{'low': 0}])):,.0f}–"
+        f"{max(f['high'] for f in r.get('forecast', [{'high': 0}])):,.0f}"
         for i, r in enumerate(top3)
     ])
     dim_label = "category" if dimension == "product_category" else "region"
@@ -188,15 +477,15 @@ Rankings (next 4 weeks forecast):
 {ranking_text}
 
 Write 2 sentences:
-1. Which {dim_label} will perform best and the key numbers
-2. One actionable insight — what this means for the business
+1. Which {dim_label} will perform best, with the average weekly value and growth rate
+2. One actionable insight — what this means for the business and where to focus
 
-Plain English, specific, no jargon.
+Plain English, specific numbers, use £ for monetary values.
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=120
+        max_tokens=130
     )
     return response.choices[0].message.content
 
@@ -204,7 +493,8 @@ Plain English, specific, no jargon.
 def explain_anomaly_by_dimension(signals: list, metric: str, dimension: str, question: str = ""):
     dim_label = "category" if dimension == "product_category" else "region"
     signals_text = "\n".join([
-        f"- {s['value']}: {s['anomaly_count']} anomalies, {s['growth_pct']:+.1f}% growth, signal={s['signal_label']}"
+        f"  {s['value']}: {s['anomaly_count']} anomalies, "
+        f"{s['growth_pct']:+.1f}% recent growth, signal={s['signal_label']}"
         for s in signals
     ])
     prompt = f"""
@@ -216,36 +506,10 @@ Metric: {metric}, by {dim_label}
 {signals_text}
 
 Write 2 sentences:
-1. Which {dim_label} has the most unusual activity and what's happening
-2. What to investigate or do next
+1. Which {dim_label} has the most unusual activity, how many anomalies, and the signal type
+2. What to investigate — be specific about which {dim_label} to look at and why
 
-Plain English, specific with values and dates, no jargon.
-"""
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=120
-    )
-    return response.choices[0].message.content
-
-
-def explain_scenario(baseline_forecast: list, scenario_forecast: list,
-                     adjustment: float, metric: str = "revenue", question: str = ""):
-    scenario_type = "flat trend" if adjustment == 0 else f"{adjustment:+.0f}% adjustment"
-    baseline_vals = [f['likely'] for f in baseline_forecast]
-    scenario_vals = [f['likely'] for f in scenario_forecast]
-    prompt = f"""
-You are a forecasting assistant. User asked: "{question}"
-Metric: {metric}, scenario: {scenario_type}
-
-Baseline forecast (likely values): {[f'{v:,.0f}' for v in baseline_vals]}
-Scenario forecast (likely values): {[f'{v:,.0f}' for v in scenario_vals]}
-
-Write 2 sentences:
-1. What changes under this scenario vs baseline — be specific with numbers
-2. Whether this is better or worse and what to watch
-
-Plain English, specific numbers, use £ for monetary values.
+Plain English, specific with values, no jargon.
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -255,48 +519,27 @@ Plain English, specific numbers, use £ for monetary values.
     return response.choices[0].message.content
 
 
-def explain_scenario_best_worst(best_forecast: list, worst_forecast: list,
-                                 baseline_forecast: list, metric: str = "revenue", question: str = ""):
-    b_total = sum(f['likely'] for f in best_forecast)
-    w_total = sum(f['likely'] for f in worst_forecast)
-    base_total = sum(f['likely'] for f in baseline_forecast)
-    prompt = f"""
-You are a forecasting assistant. User asked: "{question}"
-Metric: {metric}
-
-Best case (+20%): total {b_total:,.0f} over {len(best_forecast)} weeks, Week 1: {best_forecast[0]['likely']:,.0f}, Week {len(best_forecast)}: {best_forecast[-1]['likely']:,.0f}
-Worst case (-20%): total {w_total:,.0f} over {len(worst_forecast)} weeks, Week 1: {worst_forecast[0]['likely']:,.0f}, Week {len(worst_forecast)}: {worst_forecast[-1]['likely']:,.0f}
-Baseline: total {base_total:,.0f}
-
-Gap between best and worst: {b_total - w_total:,.0f}
-
-Write 2 sentences:
-1. The best case and worst case numbers — total and weekly range
-2. What the gap means for planning — what buffer or reserve to maintain
-
-Plain English, specific numbers, use £ for monetary values.
-"""
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=130
-    )
-    return response.choices[0].message.content
-
+# ══════════════════════════════════════════════════════════════════════════════
+# INSIGHTS EXPLAINER — unchanged
+# ══════════════════════════════════════════════════════════════════════════════
 
 def explain_insights(revenue_forecast: list, category_rankings: list, region_signals: list):
     total_growth = revenue_forecast[-1].get("growth_pct", 0) if revenue_forecast else 0
-    best_cat = category_rankings[0] if category_rankings else None
+    best_cat     = category_rankings[0] if category_rankings else None
     watch_regions = [r for r in region_signals if r["watch"]]
-    top_region = watch_regions[0] if watch_regions else (region_signals[0] if region_signals else None)
 
-    cat_text = f"Best category: {best_cat['category']} (£{best_cat['forecasted_weekly_avg']:,.0f}/week, {best_cat['growth_pct']:+.1f}% growth)" if best_cat else "No category data"
+    cat_text = (
+        f"Best category: {best_cat['category']} "
+        f"(£{best_cat['forecasted_weekly_avg']:,.0f}/week, {best_cat['growth_pct']:+.1f}% growth)"
+        if best_cat else "No category data"
+    )
     region_text = "\n".join([
-        f"Region {r['value']}: {r['signal_label']}, {r['growth_pct']:+.1f}% growth, {r['anomaly_count']} anomalies"
+        f"  Region {r['value']}: {r['signal_label']}, {r['growth_pct']:+.1f}% growth, "
+        f"{r['anomaly_count']} anomalies"
         for r in region_signals
     ]) if region_signals else "No region data"
     revenue_text = "\n".join([
-        f"{f.get('date_label', 'Week {}'.format(f['period']))}: "
+        f"  {f.get('date_label', 'Week ' + str(f['period']))}: "
         f"£{f['likely']:,.0f} (£{f['low']:,.0f}–£{f['high']:,.0f})"
         for f in revenue_forecast
     ])
@@ -312,16 +555,18 @@ Overall growth: {total_growth:+.1f}%
 Region signals:
 {region_text}
 
-Style: "Revenue is trending +8% over the next 4 weeks, driven by Electronics in the North. Watch the South — an unusual dip has been detected that may signal a demand issue."
+Style example:
+"Revenue is trending +8% over the next 4 weeks, driven by Electronics in the North.
+Watch the South — an unusual dip has been detected that may signal a demand issue."
 
-Sentence 1: Overall trend + key driver
-Sentence 2: What to watch and why
+Sentence 1: Overall trend + key driver category
+Sentence 2: Which region to watch and why
 
 Specific numbers, punchy, no jargon, use £ for monetary values.
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=110
+        max_tokens=120
     )
     return response.choices[0].message.content
