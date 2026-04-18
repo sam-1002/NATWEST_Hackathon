@@ -409,16 +409,24 @@ function AnomalyList({ anomalies }) {
 }
 
 // ─── Category Rankings ────────────────────────────────────────────────────────
-function CategoryRankings({ rankings }) {
+function CategoryRankings({ rankings, metric, loading }) {
+  if (loading) return (
+    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: '14px 16px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-tertiary)', fontSize: 12 }}>
+      <div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s ease-in-out infinite' }} />
+      Loading category rankings for {metric}...
+    </div>
+  )
   if (!rankings?.length) return null
   const max = rankings[0]?.forecasted_weekly_avg || 1
+  const metricLabel = metric || 'revenue'
   return (
     <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: '14px 16px', marginBottom: 14 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>📊 Category Rankings</div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>📊 Category Rankings · {metricLabel}</div>
       {rankings.map((r, i) => (
         <div key={r.category || r.value} style={{ marginBottom: 10 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {i === 0 && <span style={{ fontSize: 12 }}>🏆</span>}
               <div style={{ width: 7, height: 7, borderRadius: '50%', background: COLORS[i % COLORS.length] }} />
               <span style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: i === 0 ? 600 : 400 }}>{r.category || r.value}</span>
             </div>
@@ -428,7 +436,7 @@ function CategoryRankings({ rankings }) {
             </div>
           </div>
           <div style={{ height: 3, background: 'var(--bg-hover)', borderRadius: 3, overflow: 'hidden' }}>
-            <div style={{ height: '100%', width: `${((r.forecasted_weekly_avg || 0) / max) * 100}%`, background: COLORS[i % COLORS.length], borderRadius: 3, opacity: i === 0 ? 1 : 0.55 }} />
+            <div style={{ height: '100%', width: `${((r.forecasted_weekly_avg || 0) / max) * 100}%`, background: COLORS[i % COLORS.length], borderRadius: 3, opacity: i === 0 ? 1 : 0.55, transition: 'width 0.6s ease' }} />
           </div>
         </div>
       ))}
@@ -437,8 +445,7 @@ function CategoryRankings({ rankings }) {
 }
 
 // ─── Region Signals ───────────────────────────────────────────────────────────
-function RegionSignals({ signals }) {
-  if (!signals?.length) return null
+function RegionSignals({ signals, metric, loading }) {
   const signalConfig = {
     anomaly_surge: { color: '#f87171', bg: 'rgba(248,113,113,0.05)', border: 'rgba(248,113,113,0.2)', icon: '🚨', label: 'Anomaly + Surge' },
     anomaly_decline: { color: '#f87171', bg: 'rgba(248,113,113,0.05)', border: 'rgba(248,113,113,0.2)', icon: '📉', label: 'Anomaly + Decline' },
@@ -447,9 +454,17 @@ function RegionSignals({ signals }) {
     decline: { color: '#f87171', bg: 'rgba(248,113,113,0.05)', border: 'rgba(248,113,113,0.2)', icon: '📉', label: 'Decline' },
     stable: { color: '#8888a8', bg: 'rgba(255,255,255,0.02)', border: 'rgba(255,255,255,0.07)', icon: '✓', label: 'Stable' }
   }
+  if (loading) return (
+    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: '14px 16px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-tertiary)', fontSize: 12 }}>
+      <div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s ease-in-out infinite' }} />
+      Loading region signals for {metric}...
+    </div>
+  )
+  if (!signals?.length) return null
+  const metricLabel = metric || 'revenue'
   return (
     <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: '14px 16px', marginBottom: 14 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>🗺️ Region Signals</div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>🗺️ Region Signals · {metricLabel}</div>
       {signals.map((r) => {
         const regionName = r.region || r.value
         const cfg = signalConfig[r.signal] || signalConfig.stable
@@ -917,6 +932,11 @@ export default function ChatApp() {
   const [liveChart, setLiveChart] = useState(null)
   const [activeTab, setActiveTab] = useState('overview')
 
+  // Metric toggle for insights mode
+  const [activeInsightMetric, setActiveInsightMetric] = useState('revenue')
+  const [metricData, setMetricData] = useState({})
+  const [metricLoading, setMetricLoading] = useState(false)
+
   // Chat history
   const [sessions, setSessions] = useState(() => {
     try { return JSON.parse(localStorage.getItem('chat_sessions') || '[]') } catch { return [] }
@@ -978,7 +998,7 @@ export default function ChatApp() {
   const handleFile = async (e) => {
     const f = e.target.files[0]; if (!f) return
     setFile(f); setFileName(f.name); setDashData(null); setInsightsData(null); setAllCsvRows(null)
-    setMode(null); setLiveChart(null); setDataSchema(null); setActiveTab('overview')
+    setMode(null); setLiveChart(null); setDataSchema(null); setActiveTab('overview'); setActiveInsightMetric('revenue'); setMetricData({})
 
     try {
       const text = await f.text()
@@ -1032,6 +1052,69 @@ export default function ChatApp() {
       setDashData(res.data); setSelectedColumn(res.data.selected_column)
     } catch (e) { setDashError(e.response?.data?.detail || 'Forecast failed.') }
     setDashLoading(false)
+  }
+
+  // Switch metric in insights mode — fetches forecast + rankings + region signals for that metric
+  const switchInsightMetric = async (metric) => {
+    setActiveInsightMetric(metric)
+    if (metric === 'revenue') return   // already loaded from /insights
+
+    // Return cached result if we already fetched this metric
+    if (metricData[metric]) return
+
+    if (!file) return
+    setMetricLoading(true)
+    try {
+      // 1. Fetch forecast + anomalies via /chat
+      const form = new FormData()
+      form.append('file', file)
+      form.append('question', `Forecast ${metric} next ${periods} weeks`)
+      const res = await axios.post(`${API}/chat?column=${metric}`, form)
+      const d = res.data
+      if (d.forecast && d.historical) {
+        const hist   = d.historical
+        const fc     = d.forecast
+        const latest = hist[hist.length - 1]?.value
+        const first  = fc[0]?.likely
+        const growth = fc[fc.length - 1]?.growth_pct
+
+        // 2. Fetch category rankings for this metric via /chat
+        let categoryRankings = null
+        let regionSignals = null
+        try {
+          const form2 = new FormData()
+          form2.append('file', file)
+          form2.append('question', `Which category is expected to perform best next ${periods} weeks?`)
+          const res2 = await axios.post(`${API}/chat?column=${metric}`, form2)
+          if (res2.data.rankings) categoryRankings = res2.data.rankings
+        } catch {}
+
+        // 3. Fetch region signals for this metric via /chat
+        try {
+          const form3 = new FormData()
+          form3.append('file', file)
+          form3.append('question', `Which region has the most unusual activity?`)
+          const res3 = await axios.post(`${API}/chat?column=${metric}`, form3)
+          if (res3.data.signals) regionSignals = res3.data.signals
+        } catch {}
+
+        setMetricData(prev => ({
+          ...prev,
+          [metric]: {
+            latest, first, growth,
+            dateLabel: fc[0]?.date_label || '',
+            anomalyCount: d.anomalies?.length || 0,
+            anomalySubtext: d.anomalies?.length === 0 ? 'None detected' : `${d.anomalies?.length} flagged`,
+            historical: hist,
+            forecast: fc,
+            anomalies: d.anomalies || [],
+            categoryRankings,
+            regionSignals,
+          }
+        }))
+      }
+    } catch {}
+    setMetricLoading(false)
   }
 
   const sendMessage = async (text) => {
@@ -1196,33 +1279,142 @@ export default function ChatApp() {
             {dashError && <div style={{ padding: '12px 16px', background: 'var(--red-bg)', border: '1px solid rgba(248,113,113,0.25)', borderRadius: 10, color: 'var(--red)', fontSize: 13 }}>❌ {dashError}</div>}
 
             {/* ── INSIGHTS MODE ──────────────────────────────────────── */}
-            {mode === 'insights' && insightsData && !dashLoading && (
-              <div style={{ animation: 'fadeIn 0.35s ease' }}>
+            {mode === 'insights' && insightsData && !dashLoading && (() => {
+              // Derive which metric's data to show in the top cards
+              const allMetrics = insightsData.schema?.numeric_cols || ['revenue']
+              const isRevenue  = activeInsightMetric === 'revenue'
+              const cached     = metricData[activeInsightMetric]
 
-                {/* Full CSV Viewer — inline in dashboard */}
-                <CsvViewer allRows={allCsvRows} rowCount={insightsData.row_count} />
-                <ConfidenceBar confidence={insightsData.confidence} />
+              // Values for top 3 metric cards — revenue comes from insightsData, others from cache
+              const shownLatest  = isRevenue ? lastRevActual  : cached?.latest
+              const shownFirst   = isRevenue ? firstRevForecast : cached?.first
+              const shownGrowth  = isRevenue ? overallRevGrowth : cached?.growth
+              const shownDate    = isRevenue ? (id?.revenue_forecast?.[0]?.date_label || '') : (cached?.dateLabel || '')
+              const shownAnomalies = isRevenue ? insightsData.revenue_anomalies?.length : (cached?.anomalyCount ?? '—')
+              const shownAnomalySub = isRevenue ? anomalySubtext : (cached?.anomalySubtext || '')
 
-                {/* 6 Metric Cards */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 18 }}>
-                  <MetricCard label="Latest Revenue" value={`£${lastRevActual?.toLocaleString()}`} sub="Most recent period" accent="blue" icon="💰"
-                    infoText="The most recent actual revenue value from your historical data." />
-                  <MetricCard label="Week 1 Forecast" value={`£${firstRevForecast?.toLocaleString()}`} sub={id?.revenue_forecast?.[0]?.date_label || ''} accent="blue" icon="📈"
-                    infoText="The likely revenue forecast for the very next period, based on your trend model." />
-                  <MetricCard label={`Growth W${periods}`} value={`${overallRevGrowth >= 0 ? '+' : ''}${overallRevGrowth}%`} sub="vs current avg" accent={overallRevGrowth >= 0 ? 'green' : 'red'} icon={overallRevGrowth >= 0 ? '▲' : '▼'}
-                    infoText="Percentage change between your last actual value and the final forecasted week." />
-                  <MetricCard label="Best Category" value={bestCat?.category || '—'} sub={bestCat ? `£${bestCat.forecasted_weekly_avg?.toLocaleString()}/wk` : ''} accent="purple" icon="🏆"
-                    infoText="The category with the highest forecasted weekly average revenue." />
-                  <MetricCard label="Region to Watch" value={watchRegion?.region || watchRegion?.value || 'All Stable'} sub={watchRegion ? watchRegion.signal_label : 'No alerts'} accent={watchRegion ? 'orange' : 'green'} icon={watchRegion ? '⚠️' : '✓'}
-                    infoText="A region showing unusual activity — anomalies, surges, or declines. 'All Stable' means no flags." />
-                  <MetricCard label="Revenue Anomalies" value={insightsData.revenue_anomalies?.length} sub={anomalySubtext} accent={insightsData.revenue_anomalies?.length > 0 ? 'orange' : 'green'} icon="🔍"
-                    infoText="Count of data points flagged as anomalies using Z-score analysis (threshold: |Z| > 2)." />
+              const isCurrency = ['revenue', 'profit', 'sales', 'cost', 'spend', 'income', 'earnings']
+                .some(k => activeInsightMetric.toLowerCase().includes(k))
+              const fmt = v => v == null ? '—' : isCurrency ? `£${Number(v).toLocaleString()}` : Number(v).toLocaleString()
+
+              return (
+                <div style={{ animation: 'fadeIn 0.35s ease' }}>
+
+                  {/* Full CSV Viewer */}
+                  <CsvViewer allRows={allCsvRows} rowCount={insightsData.row_count} />
+                  <ConfidenceBar confidence={insightsData.confidence} />
+
+                  {/* ── Metric Toggle Bar ── */}
+                  {allMetrics.length > 1 && (
+                    <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', flexShrink: 0 }}>Metric:</span>
+                      {allMetrics.map(m => (
+                        <button key={m} onClick={() => switchInsightMetric(m)} style={{
+                          padding: '4px 13px', borderRadius: 20, fontSize: 12, cursor: 'pointer', transition: 'all 0.15s',
+                          border: `1px solid ${activeInsightMetric === m ? 'var(--accent)' : 'var(--border-hover)'}`,
+                          background: activeInsightMetric === m ? 'var(--accent-bg)' : 'var(--bg-secondary)',
+                          color: activeInsightMetric === m ? 'var(--accent-light)' : 'var(--text-secondary)',
+                          fontWeight: activeInsightMetric === m ? 600 : 400,
+                          position: 'relative'
+                        }}>
+                          {m}
+                          {metricLoading && activeInsightMetric === m && (
+                            <span style={{ marginLeft: 5, display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s ease-in-out infinite', verticalAlign: 'middle' }} />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ── Top 3 Metric Cards (update with toggle) ── */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 12 }}>
+                    <MetricCard
+                      label={`Latest ${activeInsightMetric}`}
+                      value={metricLoading && !isRevenue && !cached ? '…' : fmt(shownLatest)}
+                      sub="Most recent period" accent="blue" icon="💰"
+                      infoText={`Most recent actual value of ${activeInsightMetric} from your data.`} />
+                    <MetricCard
+                      label="Week 1 Forecast"
+                      value={metricLoading && !isRevenue && !cached ? '…' : fmt(shownFirst)}
+                      sub={shownDate} accent="blue" icon="📈"
+                      infoText={`Predicted ${activeInsightMetric} for the very next period.`} />
+                    <MetricCard
+                      label={`Growth W${periods}`}
+                      value={metricLoading && !isRevenue && !cached ? '…' : shownGrowth == null ? '—' : `${shownGrowth >= 0 ? '+' : ''}${shownGrowth}%`}
+                      sub="vs current avg"
+                      accent={shownGrowth == null ? 'blue' : shownGrowth >= 0 ? 'green' : 'red'}
+                      icon={shownGrowth == null ? '~' : shownGrowth >= 0 ? '▲' : '▼'}
+                      infoText={`% change from last actual to final forecast week for ${activeInsightMetric}.`} />
+                  </div>
+
+                  {/* ── Bottom 3 cards — always revenue-based context ── */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 18 }}>
+                    <MetricCard label="Best Category" value={bestCat?.category || '—'} sub={bestCat ? `£${bestCat.forecasted_weekly_avg?.toLocaleString()}/wk` : ''} accent="purple" icon="🏆"
+                      infoText="Category with the highest forecasted weekly revenue." />
+                    <MetricCard label="Region to Watch" value={watchRegion?.region || watchRegion?.value || 'All Stable'} sub={watchRegion ? watchRegion.signal_label : 'No alerts'} accent={watchRegion ? 'orange' : 'green'} icon={watchRegion ? '⚠️' : '✓'}
+                      infoText="Region showing unusual activity — anomalies, surges, or declines." />
+                    <MetricCard
+                      label={`${activeInsightMetric} Anomalies`}
+                      value={metricLoading && !isRevenue && !cached ? '…' : shownAnomalies}
+                      sub={shownAnomalySub}
+                      accent={shownAnomalies > 0 ? 'orange' : 'green'} icon="🔍"
+                      infoText={`Data points in ${activeInsightMetric} flagged as anomalies (Z-score analysis).`} />
+                  </div>
+
+                  <CategoryRankings
+                    rankings={isRevenue
+                      ? insightsData.category_rankings
+                      : (cached?.categoryRankings || insightsData.category_rankings)}
+                    metric={activeInsightMetric}
+                    loading={metricLoading && !cached}
+                  />
+                  <RegionSignals
+                    signals={isRevenue
+                      ? insightsData.region_signals
+                      : (cached?.regionSignals || insightsData.region_signals)}
+                    metric={activeInsightMetric}
+                    loading={metricLoading && !cached}
+                  />
+
+                  {/* ── Forecast Chart for selected metric ── */}
+                  {(() => {
+                    const chartHistorical = isRevenue
+                      ? insightsData.revenue_historical
+                      : cached?.historical
+                    const chartForecast = isRevenue
+                      ? insightsData.revenue_forecast
+                      : cached?.forecast
+                    const chartAnomalies = isRevenue
+                      ? insightsData.revenue_anomalies
+                      : cached?.anomalies
+
+                    if (!chartHistorical?.length) return null
+                    return (
+                      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: '14px 16px', marginBottom: 16 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                            📈 {activeInsightMetric} — Historical & Forecast
+                          </span>
+                          <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
+                            {[['Historical', '#4f8ef7'], ['Forecast', '#34d399'], ['Range', '#fb923c']].map(([l, c]) => (
+                              <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <div style={{ width: 6, height: 6, borderRadius: '50%', background: c }} />
+                                <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{l}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <DashForecastChart
+                          historical={chartHistorical}
+                          forecast={chartForecast}
+                          anomalies={chartAnomalies || []}
+                        />
+                      </div>
+                    )
+                  })()}
                 </div>
-
-                <CategoryRankings rankings={insightsData.category_rankings} />
-                <RegionSignals signals={insightsData.region_signals} />
-              </div>
-            )}
+              )
+            })()}
 
             {/* ── FORECAST MODE ──────────────────────────────────────── */}
             {mode === 'forecast' && dashData && !dashLoading && (

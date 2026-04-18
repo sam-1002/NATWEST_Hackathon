@@ -64,9 +64,32 @@ def read_and_validate(file: UploadFile, contents: bytes) -> pd.DataFrame:
         df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
     except Exception:
         raise HTTPException(status_code=400, detail="Could not read this file.")
-    if "date" not in df.columns:
-        raise HTTPException(status_code=400, detail="No 'date' column found.")
-    df["date"] = pd.to_datetime(df["date"])
+
+    # Use preprocessor to handle column name synonyms
+    # Handles: Date/Week/order_date -> date, Category/Segment -> product_category, Area/Zone -> region
+    try:
+        from src.backend.preprocessor import standardise_date_column, standardise_columns
+        df = standardise_date_column(df)
+        df = standardise_columns(df)
+    except HTTPException:
+        raise
+    except Exception:
+        if "date" not in df.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No date column found. Columns found: {list(df.columns)}"
+            )
+
+    # Flexible date parsing: handles DD-MM-YYYY, YYYY-MM-DD, mixed formats
+    try:
+        df["date"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
+    except Exception:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    df = df.dropna(subset=["date"])
+    if len(df) == 0:
+        raise HTTPException(status_code=400, detail="No valid dates found in the date column.")
+
     df = df.sort_values("date").reset_index(drop=True)
     return df
 
@@ -182,15 +205,16 @@ async def insights(file: UploadFile = File(...), periods: int = 4):
     region_signals = analyze_regions(df)
 
     schema = get_schema(df)
+    ai_summary = explain_insights(forecast_result["forecast"], category_rankings, region_signals)
 
-    # Rename region signals 'value' field for dashboard compat
+    # Normalise region_signals so both 'region' and 'value' keys exist
     for r in region_signals:
         if "value" in r and "region" not in r:
             r["region"] = r["value"]
+        if "region" in r and "value" not in r:
+            r["value"] = r["region"]
         if "recent_avg" in r and "recent_avg_revenue" not in r:
             r["recent_avg_revenue"] = r["recent_avg"]
-
-    ai_summary = explain_insights(forecast_result["forecast"], category_rankings, region_signals)
 
     return {
         "revenue_forecast": forecast_result["forecast"],
@@ -379,7 +403,7 @@ async def chat(
 
     # ── Q7 / Q8: scenario ─────────────────────────────────────────────────
     if intent == "scenario":
-        adj = 0.0 if scenario_type == "flat" else float(adjustment_pct)
+        adj = float(adjustment_pct)  # use parsed adjustment directly
 
         # Aggregate values
         if "product_category" in df.columns or "region" in df.columns:
