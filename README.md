@@ -26,7 +26,7 @@ It is built for sales managers tracking weekly revenue targets, retail and e-com
 - **Multivariate forecasting** — forecasts a target metric using correlated features via linear regression
 
 ### Dashboard & Visualisation
-- **Split-panel layout** — dashboard on the left, AI chat assistant on the right; charts in the chat update the dashboard simultaneously
+- **Split-panel layout** — dashboard on the left, AI chat assistant on the right
 - **CSV data preview** — full paginated, searchable table of your uploaded data visible directly in the dashboard — no need to open the file separately
 - **KPI cards** — headline metrics at a glance: latest value, Week 1 forecast with real calendar date, growth %, best category, region to watch, and anomaly count; each card has an ⓘ tooltip explaining what the number means
 - **Forecast confidence meter** — rates forecast reliability 0–100 based on data length, volatility, and seasonality; an ⓘ button shows exactly how the score is broken down (data length score, low volatility score, seasonality bonus)
@@ -377,7 +377,7 @@ NATWEST_Hackathon/
 ### Prerequisites
 
 - Python 3.10 or higher
-- Node.js 18 or higher
+- Node.js 25 or higher
 - A GitHub personal access token with access to GitHub Models (for GPT-4o)
 
 ---
